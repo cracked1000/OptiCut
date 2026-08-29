@@ -1,5 +1,6 @@
+
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.28;
 
 import "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
@@ -31,6 +32,10 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
         string name;
         address authorizedBy;
         uint256 timestamp;
+        // ✅ NEW: revocation is now a FLAG, not a deletion. This keeps revoked labs
+        // in the list so the NGJA admin panel can display them and recover their gems.
+        bool revoked;
+        uint256 revokedAt;
     }
 
     mapping(uint256 => Stone) public stones;
@@ -38,6 +43,13 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
 
     AuthorizedLab[] private _authorizedLabs;
     mapping(address => uint256) private _authorizedLabIndexPlusOne;
+
+    // ✅ NEW: on-chain index of every stone a lab has ever custodied via minting.
+    // Lets the admin panel list "all gems produced by lab X" without scanning eth_getLogs
+    // (which is unreliable on Polygon Amoy's Bor node). A stone is appended here the
+    // moment the lab mints it (genesis or transformation child). It is NOT removed on
+    // transfer — it records production history; check stones[id].custodian for who holds it now.
+    mapping(address => uint256[]) private _stonesMintedByLab;
 
     event StoneCertified(uint256 indexed tokenId, uint256 weight, string stoneState, string uri);
     event TransformationRequested(uint256 indexed tokenId, address byLab);
@@ -50,6 +62,9 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
     );
     event LabAuthorized(address indexed lab, string name, address indexed authorizedBy, uint256 timestamp);
     event LabRevoked(address indexed lab, address indexed revokedBy, uint256 timestamp);
+    // ✅ NEW: recovery events for stones stuck in Pending (e.g. after a lab was revoked).
+    event TransformationCancelled(uint256 indexed tokenId, address indexed by, uint256 timestamp);
+    event StoneReassigned(uint256 indexed tokenId, address indexed from, address indexed to, address by, uint256 timestamp);
 
     constructor() ERC1155("") {
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
@@ -69,7 +84,7 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
         string memory uri_,
         uint256 weight,
         string memory stoneState
-    ) external onlyRole(LAB_ROLE) returns (uint256) {
+    ) external onlyRole(LAB_ROLE) nonReentrant returns (uint256) {
         require(weight > 0, "Weight must be positive");
         require(bytes(uri_).length > 0, "URI required");
 
@@ -89,11 +104,13 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
         _mint(msg.sender, newId, 1, "");
         _setTokenURI(newId, uri_);
 
+        _stonesMintedByLab[msg.sender].push(newId); // ✅ NEW: track for admin recovery panel
+
         emit StoneCertified(newId, weight, stoneState, uri_);
         return newId;
     }
 
-    function requestTransformation(uint256 tokenId) external onlyRole(LAB_ROLE) {
+    function requestTransformation(uint256 tokenId) external onlyRole(LAB_ROLE) nonReentrant {
         require(balanceOf(msg.sender, tokenId) == 1, "Lab does not hold token");
 
         Stone storage stone = stones[tokenId];
@@ -157,12 +174,84 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
             _setTokenURI(childId, newUris[i]);
             children[parentTokenId].push(childId);
 
+            _stonesMintedByLab[msg.sender].push(childId); // ✅ NEW: track for admin recovery panel
+
             childIds[i] = childId;
         }
 
         emit StoneTransformed(parentTokenId, childIds, newWeights, newStates, newUris);
 
         return childIds;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ✅ NEW: RECOVERY FUNCTIONS
+    //
+    // Bug fixed: if a lab locked a gem via requestTransformation() (status = Pending)
+    // and NGJA then revoked that lab, the gem was permanently frozen:
+    //   • completeTransformation() needs LAB_ROLE + the token → revoked lab can't call it
+    //   • safeTransferFrom() requires status == Active → a Pending token can't be moved out
+    //   • no function existed to leave the Pending state
+    // These two functions provide the escape hatch.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @notice Release a stone stuck in Pending back to Active.
+    /// @dev Callable by the current custodian (if they still hold LAB_ROLE) to
+    ///      self-cancel, OR by an NGJA admin to rescue a gem whose lab was revoked.
+    function cancelTransformation(uint256 tokenId) external {
+        Stone storage s = stones[tokenId];
+        require(s.status == Status.Pending, "Stone not pending");
+
+        bool isNgja = hasRole(NGJA_ADMIN_ROLE, msg.sender);
+        bool isHolder = hasRole(LAB_ROLE, msg.sender) && balanceOf(msg.sender, tokenId) == 1;
+        require(isNgja || isHolder, "Not authorized to cancel");
+
+        s.status = Status.Active;
+
+        emit TransformationCancelled(tokenId, msg.sender, block.timestamp);
+    }
+
+    /// @notice NGJA-only forced move of a stone to another lab or to the NGJA admin itself.
+    /// @dev Bypasses the public safeTransferFrom Active-only guard by using the internal
+    ///      _safeTransferFrom, so it works even on a Pending stone held by a revoked/lost
+    ///      lab wallet. Always leaves the stone Active under the new custodian.
+    /// @param tokenId The stone to reassign.
+    /// @param to      New custodian. Must be an authorized lab, or an NGJA admin (parking).
+    function adminReassignStone(uint256 tokenId, address to)
+        external
+        onlyRole(NGJA_ADMIN_ROLE)
+        nonReentrant
+    {
+        require(to != address(0), "Invalid destination");
+        require(
+            hasRole(LAB_ROLE, to) || hasRole(NGJA_ADMIN_ROLE, to),
+            "Destination must be a lab or NGJA admin"
+        );
+
+        Stone storage s = stones[tokenId];
+        require(s.status != Status.Burned, "Stone is burned");
+
+        address from = s.custodian;
+        require(from != address(0), "Stone not minted");
+        require(balanceOf(from, tokenId) == 1, "Custodian no longer holds token");
+
+        if (from != to) {
+            // Internal transfer — skips the public override's Status.Active requirement,
+            // which is exactly what lets us rescue a Pending token.
+            _safeTransferFrom(from, to, tokenId, 1, "");
+            s.custodian = to;
+        }
+
+        // Whether reassigned or just released in place, the gem becomes workable again.
+        s.status = Status.Active;
+
+        emit StoneReassigned(tokenId, from, to, msg.sender, block.timestamp);
+    }
+
+    /// @notice All stone IDs ever minted by a given lab (production history).
+    /// @dev Use stones[id].custodian / .status to see current ownership & state.
+    function getStonesMintedByLab(address lab) external view returns (uint256[] memory) {
+        return _stonesMintedByLab[lab];
     }
 
     function getChildIds(uint256 parentId) external view returns (uint256[] memory) {
@@ -195,10 +284,39 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
         );
     }
 
+    /// @notice Returns ALL lab records — both active and revoked (check .revoked).
     function getAuthorizedLabs() external view returns (AuthorizedLab[] memory) {
         return _authorizedLabs;
     }
 
+    /// @notice ✅ NEW: only labs that currently hold LAB_ROLE (not revoked).
+    function getActiveLabs() external view returns (AuthorizedLab[] memory) {
+        return _filterLabs(false);
+    }
+
+    /// @notice ✅ NEW: only labs that have been revoked — powers the recovery panel.
+    function getRevokedLabs() external view returns (AuthorizedLab[] memory) {
+        return _filterLabs(true);
+    }
+
+    function _filterLabs(bool wantRevoked) private view returns (AuthorizedLab[] memory) {
+        uint256 labsLength = _authorizedLabs.length;
+        uint256 count = 0;
+        for (uint256 i = 0; i < labsLength; i++) {
+            if (_authorizedLabs[i].revoked == wantRevoked) count++;
+        }
+        AuthorizedLab[] memory out = new AuthorizedLab[](count);
+        uint256 j = 0;
+        for (uint256 i = 0; i < labsLength; i++) {
+            if (_authorizedLabs[i].revoked == wantRevoked) {
+                out[j] = _authorizedLabs[i];
+                j++;
+            }
+        }
+        return out;
+    }
+
+    /// @notice Total number of lab records (active + revoked).
     function getAuthorizedLabCount() external view returns (uint256) {
         return _authorizedLabs.length;
     }
@@ -213,7 +331,7 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
         uint256 id,
         uint256 amount,
         bytes memory data
-    ) public virtual override {
+    ) public virtual override nonReentrant {
         require(stones[id].status == Status.Active, "Cannot transfer a non-active token");
 
         super.safeTransferFrom(from, to, id, amount, data);
@@ -227,7 +345,7 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
         uint256[] memory ids,
         uint256[] memory amounts,
         bytes memory data
-    ) public virtual override {
+    ) public virtual override nonReentrant {
         for (uint256 i = 0; i < ids.length; i++) {
             require(stones[ids[i]].status == Status.Active, "Cannot transfer a non-active token");
         }
@@ -268,15 +386,20 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
                 lab: lab,
                 name: name,
                 authorizedBy: msg.sender,
-                timestamp: block.timestamp
+                timestamp: block.timestamp,
+                revoked: false,      // ✅ NEW
+                revokedAt: 0         // ✅ NEW
             }));
 
             _authorizedLabIndexPlusOne[lab] = _authorizedLabs.length;
         } else {
+            // ✅ UPDATED: re-authorizing a previously-revoked lab clears the flag.
             AuthorizedLab storage existingLab = _authorizedLabs[indexPlusOne - 1];
             existingLab.name = name;
             existingLab.authorizedBy = msg.sender;
             existingLab.timestamp = block.timestamp;
+            existingLab.revoked = false;
+            existingLab.revokedAt = 0;
         }
 
         emit LabAuthorized(lab, name, msg.sender, block.timestamp);
@@ -287,22 +410,19 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
 
         _revokeRole(LAB_ROLE, lab);
 
+        // ✅ UPDATED: revocation is now a soft flag instead of a hard delete.
+        // Previously we swap-and-pop()'d the lab out of _authorizedLabs, which erased
+        // all trace of it — the admin panel then had no way to list a revoked lab or
+        // recover the gems it left in Pending. We now keep the record and mark it revoked.
         uint256 indexPlusOne = _authorizedLabIndexPlusOne[lab];
 
         if (indexPlusOne != 0) {
-            uint256 removeIndex = indexPlusOne - 1;
-            uint256 lastIndex = _authorizedLabs.length - 1;
-
-            if (removeIndex != lastIndex) {
-                AuthorizedLab memory lastLab = _authorizedLabs[lastIndex];
-                _authorizedLabs[removeIndex] = lastLab;
-                _authorizedLabIndexPlusOne[lastLab.lab] = removeIndex + 1;
-            }
-
-            _authorizedLabs.pop();
-            delete _authorizedLabIndexPlusOne[lab];
+            AuthorizedLab storage existingLab = _authorizedLabs[indexPlusOne - 1];
+            existingLab.revoked = true;
+            existingLab.revokedAt = block.timestamp;
         }
 
         emit LabRevoked(lab, msg.sender, block.timestamp);
     }
 }
+

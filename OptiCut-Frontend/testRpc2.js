@@ -1,5 +1,5 @@
 import { ethers } from "ethers";
-const rpcUrl = "https://polygon-amoy.g.alchemy.com/v2/9Fhjjb3J1ADJds89SZpKs";
+const rpcUrl = "https://rpc-amoy.polygon.technology/";
 const provider = new ethers.JsonRpcProvider(rpcUrl);
 
 async function main() {
@@ -18,3 +18,5 @@ async function main() {
   console.log("labs:", labs);
 }
 main();
+
+

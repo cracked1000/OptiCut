@@ -1,0 +1,29 @@
+# Foundry configuration for OptiCut
+# Run with:  forge test -C foundry  (or:  forge test  from the repo root)
+[profile.default]
+src = "contracts"
+test = "foundry/test"
+libs = ["foundry/lib"]
+out = "foundry-out"
+cache_path = "foundry-cache"
+remappings = ["forge-std/=foundry/lib/forge-std/src/", "@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/"]
+solc_version = "0.8.28"
+optimizer = true
+optimizer_runs = 200
+via_ir = true
+evm_version = "cancun"
+verbosity = 2
+
+[fuzz]
+runs = 256
+max_test_rejects = 65536
+seed = "0x0bc7c07c71a7ccb1c0c0017c077ce17c01a7c7c07c71a7ccb1c0c0017c077ce1"
+
+[invariant]
+runs = 100
+depth = 64
+fail_on_revert = false
+call_override = false
+
+[fmt]
+line_length = 100

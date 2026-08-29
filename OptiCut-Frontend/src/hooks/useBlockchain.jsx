@@ -1,3 +1,4 @@
+
 import { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { BrowserProvider, JsonRpcProvider, Contract, keccak256, toUtf8Bytes } from 'ethers';
 import OptiCutABI from '../contracts/OptiCut.json';
@@ -43,11 +44,30 @@ async function waitForTx(tx) {
 
 export function friendlyError(err) {
   const msg = err?.shortMessage || err?.reason || err?.message || String(err);
-  // "could not coalesce error" is a Polygon Amoy public-RPC failure on eth_getLogs —
-  // NOT a transaction simulation failure.  Give a message that actually helps.
-  if (msg.includes('could not coalesce error')) {
-    return 'The public Polygon Amoy RPC is unavailable. Add a private Alchemy/Infura RPC as VITE_RPC_URL in your .env.local file and restart the dev server.';
+
+  // A revert / missing-function on a read-only view (getRevokedLabs, getActiveLabs, …)
+  // almost always means the frontend is pointed at an OLD contract that predates these
+  // functions. Tell the developer exactly that instead of a generic message.
+  if (
+    (msg.includes('execution reverted') || msg.includes('missing revert data') ||
+     msg.includes('no matching fragment') || msg.includes('call revert exception')) &&
+    (msg.includes('getRevokedLabs') || msg.includes('getActiveLabs') ||
+     msg.includes('getStonesMintedByLab') || msg.includes('cancelTransformation') ||
+     msg.includes('adminReassignStone'))
+  ) {
+    return 'This function is missing on the deployed contract — your app is pointed at an OLD contract. Redeploy the updated OptiCut.sol, then update VITE_CONTRACT_ADDRESS in .env.local and restart the dev server.';
   }
+
+  // eth_getLogs free-tier / range limit (Alchemy free tier caps at 10 blocks).
+  if (
+    msg.includes('eth_getLogs') ||
+    msg.includes('block range') ||
+    msg.includes('Free tier') ||
+    msg.includes('could not coalesce error')
+  ) {
+    return 'An event-log scan (eth_getLogs) was blocked by the RPC free-tier block-range limit. The updated app avoids eth_getLogs; if you still see this, hard-refresh and make sure the new useBlockchain.jsx is loaded.';
+  }
+
   if (msg.includes('execution reverted')) {
     return 'Transaction reverted on-chain. Check your MetaMask network and wallet permissions.';
   }
@@ -368,30 +388,119 @@ export function BlockchainProvider({ children }) {
     return receipt;
   }, [contract, isNgjaAdmin, account, checkRoles]);
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // ✅ NEW: recovery actions for gems stuck in Pending after their lab was revoked.
+  // Mirror the contract functions cancelTransformation() and adminReassignStone().
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // Release a Pending gem back to Active (NGJA admin, or the holding lab itself).
+  const cancelTransformation = useCallback(async (tokenId) => {
+    if (!contract) throw new Error('Wallet not connected');
+    const overrides = await txOverrides(account);
+    const tx = await contract.cancelTransformation(BigInt(tokenId), overrides);
+    return waitForTx(tx);
+  }, [contract, account]);
+
+  // NGJA-only: force-move a (possibly Pending) gem to another lab or to NGJA, and
+  // reset it to Active. `to` must be an authorized lab or an NGJA admin address.
+  const adminReassignStone = useCallback(async (tokenId, to) => {
+    if (!contract || !isNgjaAdmin) throw new Error('Unauthorized');
+    const overrides = await txOverrides(account);
+    const tx = await contract.adminReassignStone(BigInt(tokenId), to, overrides);
+    return waitForTx(tx);
+  }, [contract, isNgjaAdmin, account]);
+
+  // Map the raw AuthorizedLab tuple (now including revoked / revokedAt) to a JS object.
+  const mapLab = (lab) => ({
+    address: lab.lab,
+    name: lab.name,
+    authorizedBy: lab.authorizedBy,
+    timestamp: Number(lab.timestamp),
+    revoked: Boolean(lab.revoked),
+    revokedAt: Number(lab.revokedAt),
+  });
+
+  // Only labs that still hold LAB_ROLE.
+  const getActiveLabs = useCallback(async () => {
+    const c = makeReadOnlyContract();
+    const raw = await c.getActiveLabs();
+    return raw.map(mapLab);
+  }, []);
+
+  // Only revoked labs — the ones the recovery panel cares about.
+  const getRevokedLabs = useCallback(async () => {
+    const c = makeReadOnlyContract();
+    const raw = await c.getRevokedLabs();
+    return raw.map(mapLab);
+  }, []);
+
+  // All stone IDs ever minted by a lab (production history).
+  const getStonesMintedByLab = useCallback(async (labAddress) => {
+    const c = makeReadOnlyContract();
+    const ids = await c.getStonesMintedByLab(labAddress);
+    return ids.map((id) => Number(id));
+  }, []);
+
+  // Composite helper that powers the "Revoked Labs → gems" panel.
+  // For each revoked lab, fetch the stones it minted and their live state.
+  // NOTE: deliberately uses c.stones(id) eth_calls (like getStonesForAccount) instead
+  // of eth_getLogs, which is unreliable on Polygon Amoy's Bor node.
+  const getRevokedLabsWithGems = useCallback(async () => {
+    const c = makeReadOnlyContract();
+    const revoked = (await c.getRevokedLabs()).map(mapLab);
+
+    const withGems = await Promise.all(revoked.map(async (lab) => {
+      const ids = (await c.getStonesMintedByLab(lab.address)).map((id) => Number(id));
+
+      const gems = await Promise.all(ids.map(async (id) => {
+        const s = await c.stones(BigInt(id)).catch(() => null);
+        if (!s) return null;
+        return {
+          tokenId: id,
+          weight: Number(s.weight),
+          stoneState: s.stoneState,
+          status: Number(s.status),      // 0 Active, 1 Pending, 2 Burned
+          timestamp: Number(s.timestamp),
+          custodian: s.custodian,
+          // "still held by this revoked lab" — the case that needs rescuing
+          heldByLab: s.custodian && s.custodian.toLowerCase() === lab.address.toLowerCase(),
+        };
+      }));
+
+      const clean = gems.filter(Boolean);
+      return {
+        ...lab,
+        gems: clean,
+        pendingCount: clean.filter((g) => g.status === 1).length,
+        stuckCount: clean.filter((g) => g.status === 1 && g.heldByLab).length,
+      };
+    }));
+
+    return withGems;
+  }, []);
+
   // Primary path: direct contract read (fast, single RPC call).
   // The ABI now includes the `name` field in the AuthorizedLab struct,
   // so lab.name is available after regenerating OptiCut.json via exportABI.js.
   const getAuthorizedLabs = useCallback(async () => {
-    // ── Primary path: direct contract read (fast, single RPC call) ──
+    // Direct contract read (single eth_call). We intentionally DO NOT fall back to
+    // eth_getLogs event reconstruction: Alchemy's free tier caps eth_getLogs at a
+    // 10-block range, so the fallback always fails and produced a misleading
+    // "public RPC unavailable" error. A direct-read failure now surfaces honestly.
     try {
       const c = makeReadOnlyContract();
       const raw = await c.getAuthorizedLabs();
-      // ✅ UPDATED: map includes `name` field from the AuthorizedLab struct
       return raw.map((lab) => ({
         address: lab.lab,
         name: lab.name,
         authorizedBy: lab.authorizedBy,
         timestamp: Number(lab.timestamp),
+        // present on the new contract; undefined/false on older deployments
+        revoked: Boolean(lab.revoked),
+        revokedAt: lab.revokedAt !== undefined ? Number(lab.revokedAt) : 0,
       }));
-    } catch (directErr) {
-      console.warn('[OptiCut] Direct getAuthorizedLabs() failed, trying event fallback:', directErr);
-    }
-
-    // ── Fallback path: reconstruct from LabAuthorized / LabRevoked events ──
-    try {
-      return await getAuthorizedLabsFromEvents();
     } catch (err) {
-      console.error('[OptiCut] getAuthorizedLabs (events fallback) also failed:', err);
+      console.error('[OptiCut] getAuthorizedLabs() direct read failed:', err);
       throw new Error(friendlyError(err));
     }
   }, []);
@@ -460,12 +569,17 @@ export function BlockchainProvider({ children }) {
     checkAndSwitchNetwork, getStoneDetails, getChildren: getChildIds, getChildIds,
     getLineage, registerGenesis, requestTransformation, completeTransformation,
     grantLab, revokeLab, getAuthorizedLabs, getStonesForAccount, getMintedTokenId,
+    // ✅ NEW recovery exports
+    cancelTransformation, adminReassignStone,
+    getActiveLabs, getRevokedLabs, getStonesMintedByLab, getRevokedLabsWithGems,
     contract, provider, signer, readOnlyContract: null,
   }), [
     account, isLab, isNgjaAdmin, loading, connect, contractError,
     checkAndSwitchNetwork, getStoneDetails, getChildIds, getLineage,
     registerGenesis, requestTransformation, completeTransformation,
     grantLab, revokeLab, getAuthorizedLabs, getStonesForAccount, getMintedTokenId,
+    cancelTransformation, adminReassignStone,
+    getActiveLabs, getRevokedLabs, getStonesMintedByLab, getRevokedLabsWithGems,
     contract, provider, signer,
   ]);
 
@@ -481,3 +595,4 @@ export function useBlockchain() {
   if (!ctx) throw new Error('useBlockchain must be inside <BlockchainProvider>');
   return ctx;
 }
+

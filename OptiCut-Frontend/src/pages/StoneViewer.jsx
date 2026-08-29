@@ -2,8 +2,8 @@ import { useState, useEffect } from 'react';
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom';
 import { useBlockchain } from '../hooks/useBlockchain';
 import QRGenerator from '../components/QRGenerator';
-import { 
-  Search, ArrowLeft, Clock, Weight, Gem, User, 
+import {
+  Search, ArrowLeft, Clock, Weight, Gem, User,
   FileCheck, Scissors, GitBranch, X, ExternalLink,
   ChevronRight, ShieldCheck, AlertTriangle, Diamond, Info
 } from 'lucide-react';
@@ -14,7 +14,7 @@ const formatWeight = (raw) => (raw / 100).toFixed(2) + ' ct';
 const formatDate = (ts) => {
   if (!ts) return '—';
   return new Date(ts * 1000).toLocaleDateString('en-US', {
-    year: 'numeric', month: 'long', day: 'numeric',
+    year: 'numeric', month: 'short', day: 'numeric',
     hour: '2-digit', minute: '2-digit'
   });
 };
@@ -29,151 +29,144 @@ const resolveIpfsImage = (ipfsUri) => {
   return `https://gateway.pinata.cloud/ipfs/${cid}`;
 };
 
-// ── Status Config ──
+// ── Status Config: the stone's on-chain lifecycle state ──
 const STATUS_CONFIG = {
-  0: { 
-    label: 'Active', 
+  0: {
+    label: 'Active',
     badge: 'badge-green',
     icon: ShieldCheck,
-    color: '#10b981',
-    bg: 'rgba(16, 185, 129, 0.06)',
-    border: 'rgba(16, 185, 129, 0.15)'
+    plain: 'Certified & Active',
+    sub: 'Verified on-chain and ready for trade.',
   },
-  1: { 
-    label: 'Pending Transformation', 
+  1: {
+    label: 'Pending',
     badge: 'badge-amber',
     icon: Clock,
-    color: '#d97706',
-    bg: 'rgba(245, 158, 11, 0.06)',
-    border: 'rgba(245, 158, 11, 0.15)'
+    plain: 'Transformation Pending',
+    sub: 'Currently being processed by the laboratory.',
   },
-  2: { 
-    label: 'Burned (Cut)', 
+  2: {
+    label: 'Cut',
     badge: 'badge-gray',
     icon: Scissors,
-    color: '#6b6b6b',
-    bg: 'rgba(107, 107, 107, 0.06)',
-    border: 'rgba(107, 107, 107, 0.15)'
+    plain: 'Stone Was Cut',
+    sub: 'This record was transformed into new stones.',
   },
 };
 
-const STATE_COLORS = {
-  'Rough':    { bg: 'bg-stone-500/15',   text: 'text-stone-400',   border: 'border-stone-500/20' },
-  'Preform':  { bg: 'bg-blue-500/15',    text: 'text-blue-400',    border: 'border-blue-500/20' },
-  'Cut':      { bg: 'bg-purple-500/15',  text: 'text-purple-400',  border: 'border-purple-500/20' },
-  'Polished': { bg: 'bg-emerald-500/15', text: 'text-emerald-400', border: 'border-emerald-500/20' },
-};
+const statusCfgFor = (status) => STATUS_CONFIG[status] ?? STATUS_CONFIG[0];
 
-// ── Stone display name helper ──
-// Primary: stoneState ("Rough", "Cut", …)  Secondary: token ID
-const stoneName = (stoneState, id) => (
-  <>
-    {stoneState}{' '}
-    <span className="text-[var(--color-text-muted)] font-medium text-[0.75em]">#{id}</span>
-  </>
-);
+// ══════════════════════════════════════════════════════════════════════
+// Resolve every branch below a cut stone down to the stones that still
+// currently exist (Active / Pending). A stone only "ends" a branch once
+// it is no longer Cut — that may be several transformations deep.
+// Returns a flat list of { id, ...details, trail, deadEnd? }, where
+// `trail` is the list of intermediate Cut stones strictly between the
+// stone the user searched for and this result (root excluded).
+// ══════════════════════════════════════════════════════════════════════
+async function resolveCurrentDescendants(startId, { getStoneDetails, getChildIds }) {
+  const seen = new Set();
 
-// ── Components ──
+  async function walk(tokenId, trail, depth) {
+    if (seen.has(tokenId) || depth > 64) {
+      // Defensive guard against malformed/cyclical on-chain data.
+      return [{ id: tokenId, trail, deadEnd: true, malformed: true }];
+    }
+    seen.add(tokenId);
 
-function StatusBanner({ status }) {
-  const cfg = STATUS_CONFIG[status] || STATUS_CONFIG[0];
-  const Icon = cfg.icon;
+    const details = await getStoneDetails(tokenId);
 
-  if (status === 0) {
-    return (
-      <div className="flex items-center gap-3 px-5 py-4 rounded-2xl mb-6"
-        style={{ background: cfg.bg, border: `1px solid ${cfg.border}` }}>
-        <div className="w-10 h-10 rounded-xl bg-emerald-500/10 flex items-center justify-center flex-shrink-0">
-          <Icon size={20} className="text-emerald-500" />
-        </div>
-        <div>
-          <p className="font-bold text-emerald-500 text-sm">Certified & Active</p>
-          <p className="text-emerald-500/60 text-xs mt-0.5">This gemstone is verified on the blockchain and ready for trade</p>
-        </div>
-      </div>
+    if (details.status !== 2) {
+      return [{ id: tokenId, ...details, trail }];
+    }
+
+    const childIds = await getChildIds(tokenId);
+    if (childIds.length === 0) {
+      return [{ id: tokenId, ...details, trail, deadEnd: true }];
+    }
+
+    const nextTrail = tokenId === startId ? trail : [...trail, { id: tokenId, ...details }];
+    const branches = await Promise.all(
+      childIds.map((cid) => walk(cid, nextTrail, depth + 1))
     );
+    return branches.flat();
   }
-  if (status === 1) {
-    return (
-      <div className="flex items-center gap-3 px-5 py-4 rounded-2xl mb-6"
-        style={{ background: cfg.bg, border: `1px solid ${cfg.border}` }}>
-        <div className="w-10 h-10 rounded-xl bg-amber-500/10 flex items-center justify-center flex-shrink-0">
-          <Icon size={20} className="text-amber-500" />
-        </div>
-        <div>
-          <p className="font-bold text-amber-500 text-sm">Transformation Pending</p>
-          <p className="text-amber-500/60 text-xs mt-0.5">This stone is currently being processed by the laboratory</p>
-        </div>
-      </div>
-    );
-  }
+
+  return walk(startId, [], 0);
+}
+
+// ── Trail breadcrumb: "via #12 → #45" ──
+function TrailBreadcrumb({ trail }) {
+  if (!trail || trail.length === 0) return null;
   return (
-    <div className="flex items-center gap-3 px-5 py-4 rounded-2xl mb-6"
-      style={{ background: cfg.bg, border: `1px solid ${cfg.border}` }}>
-      <div className="w-10 h-10 rounded-xl bg-gray-500/10 flex items-center justify-center flex-shrink-0">
-        <Icon size={20} className="text-gray-400" />
-      </div>
-      <div>
-        <p className="font-bold text-gray-400 text-sm">Stone Was Cut</p>
-        <p className="text-gray-500/60 text-xs mt-0.5">This stone was transformed — see the resulting stones below</p>
-      </div>
+    <div className="flex items-center gap-1.5 flex-wrap text-xs text-[var(--color-text-muted)] mt-1.5">
+      <Scissors size={12} className="flex-shrink-0" />
+      <span>via</span>
+      {trail.map((t, i) => (
+        <span key={t.id} className="flex items-center gap-1.5">
+          <span className="font-semibold text-[var(--color-text-secondary)]">#{t.id}</span>
+          {i < trail.length - 1 && <span>→</span>}
+        </span>
+      ))}
     </div>
   );
 }
 
-function TimelineCard({ stone, isCurrent, isFirst }) {
-  const cfg = STATUS_CONFIG[stone.status] || STATUS_CONFIG[0];
-  const stateStyle = STATE_COLORS[stone.stoneState] || STATE_COLORS['Rough'];
+// ── Modal: shows a snapshot of any stone in the timeline without navigating ──
+function StoneSnapshotModal({ stone, onClose }) {
+  if (!stone) return null;
+  const cfg = statusCfgFor(stone.status);
+  const img = resolveIpfsImage(stone.ipfsUri);
+  const Icon = cfg.icon;
 
   return (
-    <div className="relative pl-8 pb-8">
-      {!isFirst && (
-        <div className="absolute left-[11px] top-0 bottom-0 w-0.5 bg-gradient-to-b from-[var(--color-border-default)] to-[var(--color-text-primary)]" />
-      )}
-      <div className={`absolute left-0 top-1 w-6 h-6 rounded-full border-[3px] border-[var(--color-bg-primary)] flex items-center justify-center z-10 ${
-        isCurrent ? 'bg-[var(--color-text-primary)] shadow-lg shadow-white/10' : 
-        stone.status === 2 ? 'bg-[var(--color-text-muted)]' : 'bg-[var(--color-text-primary)]'
-      }`}>
-        {isCurrent && <div className="w-2 h-2 bg-[var(--color-bg-primary)] rounded-full" />}
-      </div>
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <h3 className="text-lg font-bold text-[var(--color-text-primary)] truncate">
+              {stone.stoneState} <span className="text-[var(--color-text-muted)] text-base font-medium">#{stone.id}</span>
+            </h3>
+            <span className={`badge ${cfg.badge} flex-shrink-0`}>{cfg.label}</span>
+          </div>
+          <button onClick={onClose} className="icon-btn p-2 flex-shrink-0" aria-label="Close">
+            <X size={20} className="text-[var(--color-text-muted)]" />
+          </button>
+        </div>
 
-      <div className={`card p-5 transition-all ${isCurrent ? 'border-[var(--color-text-primary)]/20 bg-[var(--color-text-primary)]/[0.02]' : ''}`}>
-        <div className="flex items-start justify-between gap-4">
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 flex-wrap mb-2">
-              {/* CHANGED: stoneState as primary label, id as secondary */}
-              <span className="font-bold text-[var(--color-text-primary)] text-base">
-                {stoneName(stone.stoneState, stone.id)}
-              </span>
-              {isCurrent && <span className="badge badge-green text-[10px]">Current</span>}
-              <span className={`badge ${cfg.badge} text-[10px]`}>{cfg.label}</span>
-            </div>
+        <div className="modal-body space-y-4">
+          <p className="text-sm text-[var(--color-text-secondary)] leading-relaxed">{cfg.sub}</p>
 
-            <div className="flex flex-wrap items-center gap-3 text-sm">
-              <span className="font-bold text-[var(--color-text-primary)] text-lg">{formatWeight(stone.weight)}</span>
-              <span className={`px-2.5 py-1 rounded-lg text-xs font-semibold border ${stateStyle.bg} ${stateStyle.text} ${stateStyle.border}`}>
-                {stone.stoneState}
-              </span>
-              <span className="text-[var(--color-text-muted)] text-xs flex items-center gap-1">
-                <Clock size={12} />
-                {formatDate(stone.timestamp)}
-              </span>
-            </div>
+          {img && (
+            <img
+              src={img}
+              alt={`${stone.stoneState} #${stone.id}`}
+              className="w-full rounded-xl border border-[var(--color-border-default)] object-contain bg-[var(--color-bg-secondary)]"
+              style={{ maxHeight: '220px' }}
+            />
+          )}
 
-            <div className="mt-3 flex items-center gap-2">
-              <User size={12} className="text-[var(--color-text-muted)]" />
-              <span className="mono-addr text-[11px]">{shortAddr(stone.custodian)}</span>
-            </div>
+          <div className="rounded-2xl overflow-hidden border border-[var(--color-border-subtle)]">
+            <DetailRow label="Weight" value={formatWeight(stone.weight)} icon={Weight} />
+            <DetailRow label="Stage" value={stone.stoneState} icon={Gem} />
+            <DetailRow label="Timestamp" value={formatDate(stone.timestamp)} icon={Clock} />
+            <DetailRow label="Custodian" value={shortAddr(stone.custodian)} icon={User} mono />
+            <DetailRow
+              label="Parent"
+              value={!stone.parentTokenId ? 'Genesis' : `#${stone.parentTokenId}`}
+              icon={GitBranch}
+            />
           </div>
 
-          {stone.ipfsUri && (
-            <a 
-              href={resolveIpfsImage(stone.ipfsUri)}
+          {img && (
+            <a
+              href={img}
               target="_blank"
               rel="noopener noreferrer"
-              className="flex-shrink-0 p-2 hover:bg-white/5 rounded-xl transition"
+              className="btn btn-sm btn-ghost w-full justify-center text-[var(--color-text-primary)]"
             >
-              <ExternalLink size={16} className="text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition" />
+              <ExternalLink size={14} />
+              View Certificate on IPFS
             </a>
           )}
         </div>
@@ -182,33 +175,102 @@ function TimelineCard({ stone, isCurrent, isFirst }) {
   );
 }
 
-function ChildCard({ stone, navigate }) {
-  const cfg = STATUS_CONFIG[stone.status] || STATUS_CONFIG[0];
-  const stateStyle = STATE_COLORS[stone.stoneState] || STATE_COLORS['Rough'];
+function TimelineNode({ stone, isCurrent, isFirst, index = 0, onOpen }) {
+  const cfg = statusCfgFor(stone.status);
+  const NodeIcon = stone.parentTokenId === 0 ? Diamond : stone.status === 2 ? Scissors : Gem;
+  const nodeClass =
+    stone.status === 2 ? 'journey-node--burned'
+    : stone.status === 1 ? 'journey-node--pending'
+    : 'journey-node--genesis';
+
+  const clickable = !isCurrent;
+
+  return (
+    <div className="relative pl-9 pb-4">
+      <div className={`journey-node ${nodeClass} ${isCurrent ? 'journey-node--current animate-pulse-glow-soft' : ''}`}>
+        <NodeIcon />
+      </div>
+
+      <button
+        type="button"
+        onClick={clickable ? () => onOpen(stone) : undefined}
+        disabled={!clickable}
+        className={`journey-card w-full text-left ${isCurrent ? 'journey-card--current' : ''} ${clickable ? 'cursor-pointer' : 'cursor-default'}`}
+        style={{ display: 'block' }}
+      >
+        <div className="journey-step text-xs mb-1.5">
+          {isFirst ? <><b>✦</b> Origin</> : isCurrent ? <><b>◆</b> Current</> : <><b>✂</b> Cut {index}</>}
+        </div>
+
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap mb-1.5">
+              <span className="text-base font-bold text-[var(--color-text-primary)]">
+                {stone.stoneState} <span className="text-[var(--color-text-muted)] font-medium text-sm">#{stone.id}</span>
+              </span>
+              {isCurrent && <span className="badge badge-green">Current</span>}
+              <span className={`badge ${cfg.badge}`}>{cfg.label}</span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-[var(--color-text-muted)]">
+              <span className="flex items-center gap-1.5">
+                <Weight size={14} />
+                <b className="text-[var(--color-text-primary)]">{formatWeight(stone.weight)}</b>
+              </span>
+              <span className="flex items-center gap-1.5">
+                <Clock size={13} />
+                {formatDate(stone.timestamp)}
+              </span>
+            </div>
+          </div>
+
+          {clickable && (
+            <ChevronRight size={18} className="text-[var(--color-text-muted)] flex-shrink-0 mt-1" />
+          )}
+        </div>
+      </button>
+    </div>
+  );
+}
+
+// ── A currently-existing stone reached from a cut root (used in both the
+//    disambiguation screen and the "Resulting Stones" section) ──
+function ResultCard({ stone, navigate }) {
+  if (stone.deadEnd) {
+    return (
+      <div className="alert alert-amber items-start">
+        <AlertTriangle size={18} className="flex-shrink-0 mt-0.5" />
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold">
+            Stone #{stone.id} was cut, but no resulting stone is recorded on-chain
+          </p>
+          <TrailBreadcrumb trail={stone.trail} />
+        </div>
+      </div>
+    );
+  }
+
+  const cfg = statusCfgFor(stone.status);
 
   return (
     <button
       onClick={() => navigate(`/?id=${stone.id}`)}
-      className="w-full text-left card-interactive card p-5 group"
+      className="child-card group"
     >
-      <div className="flex items-center justify-between">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap mb-2">
-            {/* CHANGED: stoneState as primary label, id as secondary */}
-            <span className="font-bold text-[var(--color-text-primary)] group-hover:text-[var(--color-text-primary)] transition-colors">
-              {stoneName(stone.stoneState, stone.id)}
-            </span>
-            <span className={`badge ${cfg.badge} text-[10px]`}>{cfg.label}</span>
-          </div>
-          <div className="flex flex-wrap items-center gap-3">
-            <span className="font-bold text-[var(--color-text-primary)]">{formatWeight(stone.weight)}</span>
-            <span className={`px-2 py-0.5 rounded-lg text-xs font-semibold border ${stateStyle.bg} ${stateStyle.text} ${stateStyle.border}`}>
-              {stone.stoneState}
-            </span>
-          </div>
-        </div>
-        <ChevronRight size={18} className="text-[var(--color-text-muted)] group-hover:text-[var(--color-text-primary)] transition-colors flex-shrink-0" />
+      <div className="child-card-icon">
+        <Gem size={18} />
       </div>
+      <div className="flex-1 min-w-0 text-left">
+        <div className="flex items-center gap-2 flex-wrap mb-1">
+          <span className="text-base font-bold text-[var(--color-text-primary)]">
+            {stone.stoneState} <span className="text-[var(--color-text-muted)] font-medium text-sm">#{stone.id}</span>
+          </span>
+          <span className={`badge ${cfg.badge}`}>{cfg.label}</span>
+        </div>
+        <span className="text-lg font-bold text-[var(--color-text-primary)]">{formatWeight(stone.weight)}</span>
+        <TrailBreadcrumb trail={stone.trail} />
+      </div>
+      <ChevronRight size={20} className="text-[var(--color-text-muted)] group-hover:text-[var(--color-accent)] transition-colors flex-shrink-0" />
     </button>
   );
 }
@@ -219,12 +281,11 @@ function GemImage({ src, alt }) {
 
   if (error) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 text-[var(--color-text-muted)]">
-        <div className="w-16 h-16 rounded-2xl bg-[var(--color-bg-elevated)] border border-[var(--color-border-default)] flex items-center justify-center mb-4">
-          <Gem size={28} className="text-[var(--color-text-muted)]" />
+      <div className="flex flex-col items-center justify-center py-12 text-[var(--color-text-muted)]">
+        <div className="w-14 h-14 rounded-2xl bg-[var(--color-bg-elevated)] border border-[var(--color-border-default)] flex items-center justify-center mb-3">
+          <Gem size={26} className="text-[var(--color-text-muted)]" />
         </div>
         <p className="text-sm font-medium">Image unavailable</p>
-        <p className="text-xs text-[var(--color-text-muted)] mt-1">The certificate image could not be loaded</p>
       </div>
     );
   }
@@ -240,7 +301,7 @@ function GemImage({ src, alt }) {
         src={src}
         alt={alt}
         className={`w-full rounded-2xl border border-[var(--color-border-default)] object-contain bg-[var(--color-bg-secondary)] transition-opacity duration-300 ${loading ? 'opacity-0' : 'opacity-100'}`}
-        style={{ maxHeight: '320px' }}
+        style={{ maxHeight: '280px' }}
         onLoad={() => setLoading(false)}
         onError={() => setError(true)}
       />
@@ -250,80 +311,70 @@ function GemImage({ src, alt }) {
 
 function DetailRow({ label, value, icon: Icon, mono = false }) {
   return (
-    <div className="flex items-center justify-between py-3 border-b border-[var(--color-border-subtle)] last:border-0">
-      <div className="flex items-center gap-2 text-[var(--color-text-muted)]">
-        {Icon && <Icon size={14} />}
-        <span className="text-xs font-semibold uppercase tracking-wider">{label}</span>
+    <div className="flex items-center justify-between gap-4 px-4 py-3.5 border-b border-[var(--color-border-subtle)] last:border-b-0" style={{ background: 'var(--color-bg-card)' }}>
+      <div className="flex items-center gap-2 text-[var(--color-text-muted)] text-xs font-semibold uppercase tracking-wide flex-shrink-0">
+        {Icon && <Icon size={15} />}
+        <span>{label}</span>
       </div>
-      <span className={mono ? 'mono-addr' : 'text-[var(--color-text-primary)] font-medium text-sm'}>{value}</span>
+      <span className={mono ? 'mono-addr text-xs' : 'text-[15px] font-semibold text-[var(--color-text-primary)] text-right'}>{value}</span>
     </div>
   );
 }
 
 function Spinner() {
   return (
-    <div className="flex flex-col items-center justify-center py-24 gap-5">
+    <div className="flex flex-col items-center justify-center py-20 gap-4">
       <div className="relative">
-        <div className="w-12 h-12 rounded-full border-3 border-[var(--color-border-default)] border-t-[var(--color-text-primary)] animate-spin" />
-        <div className="absolute inset-0 w-12 h-12 rounded-full border-3 border-transparent border-b-[var(--color-border-hover)] animate-spin" style={{ animationDirection: 'reverse', animationDuration: '1.5s' }} />
+        <div className="w-11 h-11 rounded-full border-[3px] border-[var(--color-border-default)] border-t-[var(--color-text-primary)] animate-spin" />
+        <div className="absolute inset-0 w-11 h-11 rounded-full border-[3px] border-transparent border-b-[var(--color-border-hover)] animate-spin" style={{ animationDirection: 'reverse', animationDuration: '1.5s' }} />
       </div>
       <div className="text-center">
-        <p className="text-[var(--color-text-secondary)] font-semibold text-sm">Loading stone data</p>
-        <p className="text-[var(--color-text-muted)] text-xs mt-1">Fetching from Polygon Amoy blockchain...</p>
+        <p className="text-[var(--color-text-secondary)] font-semibold text-sm">Loading stone data…</p>
+        <p className="text-[var(--color-text-muted)] text-xs mt-1">Fetching from Polygon Amoy</p>
       </div>
     </div>
   );
 }
 
-// ── NEW: Disambiguation view for burned stones with multiple children ──
-// Shown instead of the normal stone view when a burned stone has 2+ children.
+// ── Disambiguation view: burned root whose branches settle into 2+
+//    currently-existing stones (however many cuts deep that took) ──
 function DisambiguationView({ burned, children, navigate }) {
-  const stateStyle = STATE_COLORS[burned.stoneState] || STATE_COLORS['Rough'];
-
   return (
     <div className="space-y-6 animate-slide-up">
-      {/* Header */}
-      <div className="card-elevated">
-        <div className="flex items-start gap-5">
-          <div className="w-16 h-16 rounded-2xl bg-[var(--color-bg-hover)] border border-[var(--color-border-default)] flex items-center justify-center flex-shrink-0">
-            <Scissors size={28} className="text-[var(--color-text-muted)]" />
+      <div className="card-elevated p-6 sm:p-7">
+        <div className="flex items-start gap-4">
+          <div className="w-14 h-14 rounded-2xl bg-[var(--color-accent-glow)] border border-[var(--color-accent-ring)] flex items-center justify-center flex-shrink-0">
+            <Scissors size={24} className="text-[var(--color-accent)]" />
           </div>
           <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-3 flex-wrap mb-1">
-              <h2 className="text-2xl font-extrabold text-[var(--color-text-primary)]">
-                {stoneName(burned.stoneState, burned.id)}
+            <div className="flex items-center gap-2 flex-wrap mb-2">
+              <h2 className="text-xl sm:text-2xl font-bold text-[var(--color-text-primary)] tracking-tight">
+                {burned.stoneState} <span className="text-[var(--color-text-muted)] text-base font-medium">#{burned.id}</span>
               </h2>
-              <span className="badge badge-gray">Burned</span>
+              <span className="badge badge-gray">Cut</span>
             </div>
-            <p className="text-[var(--color-text-muted)] text-sm">
-              This stone has been cut — it no longer exists as an active token.
-              Select a resulting stone below to view its certificate.
+            <p className="text-[var(--color-text-secondary)] text-sm leading-relaxed">
+              This stone was cut and no longer exists on its own. It led to {children.length} stone{children.length === 1 ? '' : 's'} that {children.length === 1 ? 'is' : 'are'} still active today.
             </p>
           </div>
         </div>
-
-        <div className="divider my-5" />
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8">
-          <DetailRow label="Original Weight" value={formatWeight(burned.weight)} icon={Weight} />
-          <DetailRow label="Stone State"     value={burned.stoneState}            icon={Gem} />
-          <DetailRow label="Certified"       value={formatDate(burned.timestamp)} icon={Clock} />
-          <DetailRow label="Token ID"        value={`#${burned.id}`}             icon={FileCheck} />
-        </div>
       </div>
 
-      {/* Resulting stones — prominent */}
-      <div className="card">
-        <h3 className="section-title mb-2 flex items-center gap-2">
-          <Scissors size={18} className="text-[var(--color-text-secondary)]" />
-          Resulting Stones ({children.length})
-        </h3>
-        <p className="section-sub mb-5">
-          Stone #{burned.id} was cut into the following gemstones. Click one to view its certificate.
-        </p>
+      <div className="card p-6 sm:p-7">
+        <div className="flex items-center gap-3 mb-5">
+          <div className="w-10 h-10 rounded-xl bg-[var(--color-accent-glow)] border border-[var(--color-accent-ring)] flex items-center justify-center">
+            <Gem size={18} className="text-[var(--color-accent)]" />
+          </div>
+          <div>
+            <h3 className="text-base font-bold text-[var(--color-text-primary)]">
+              Currently Existing Stones ({children.length})
+            </h3>
+            <p className="text-sm text-[var(--color-text-muted)] mt-0.5">Tap one to view its certificate</p>
+          </div>
+        </div>
         <div className="space-y-3">
           {children.map((child) => (
-            <ChildCard key={child.id} stone={child} navigate={navigate} />
+            <ResultCard key={child.id} stone={child} navigate={navigate} />
           ))}
         </div>
       </div>
@@ -343,17 +394,14 @@ export default function StoneViewer() {
 
   const [stone, setStone] = useState(null);
   const [lineage, setLineage] = useState([]);
-  const [children, setChildren] = useState([]);
   const [childDetails, setChildDetails] = useState([]);
   const [fetchLoading, setFetchLoading] = useState(false);
   const [error, setError] = useState(null);
-  // NEW: holds { burned, children[] } when a burned stone has multiple children
   const [disambig, setDisambig] = useState(null);
+  const [modalStone, setModalStone] = useState(null);
 
-  // NEW: ?from=N tells us we were redirected from a burned stone
   const redirectedFrom = searchParams.get('from');
 
-  // Determine tokenId from URL
   useEffect(() => {
     const fromParam = paramId;
     const fromQuery = searchParams.get('id');
@@ -371,7 +419,6 @@ export default function StoneViewer() {
     }
   }, [paramId, searchParams]);
 
-  // Fetch stone data
   useEffect(() => {
     if (!tokenId) return;
     let cancelled = false;
@@ -381,9 +428,9 @@ export default function StoneViewer() {
       setError(null);
       setStone(null);
       setLineage([]);
-      setChildren([]);
       setChildDetails([]);
-      setDisambig(null); // NEW: reset disambiguation state
+      setDisambig(null);
+      setModalStone(null);
 
       try {
         const stoneData = await getStoneDetails(tokenId);
@@ -395,35 +442,35 @@ export default function StoneViewer() {
           return;
         }
 
-        // ── NEW: Burned stone handling ──
-        // A burned stone's data is preserved on-chain but the token no longer exists.
-        // We route the user to the resulting stone(s) instead of showing a dead end.
+        // ── Burned stone: resolve all the way down to whatever currently exists ──
         if (stoneData.status === 2) {
-          const childIds = await getChildIds(tokenId);
+          const rootChildIds = await getChildIds(tokenId);
           if (cancelled) return;
 
-          if (childIds.length === 1) {
-            // Single child: silently redirect, carry ?from= so we can show the banner
-            navigate(`/?id=${childIds[0]}&from=${tokenId}`, { replace: true });
-            return;
-          }
-
-          if (childIds.length > 1) {
-            // Multiple children: show disambiguation screen, not a redirect
-            const details = await Promise.all(childIds.map(id => getStoneDetails(id)));
+          if (rootChildIds.length > 0) {
+            const resolved = await resolveCurrentDescendants(tokenId, { getStoneDetails, getChildIds });
             if (cancelled) return;
-            setDisambig({
-              burned: { id: tokenId, ...stoneData },
-              children: details.map((d, i) => ({ id: childIds[i], ...d })),
-            });
-            setFetchLoading(false);
-            return;
-          }
 
-          // Edge case: burned but no children recorded — fall through to normal display
+            const liveOnly = resolved.filter((r) => !r.deadEnd);
+            const hasDeadEnds = resolved.some((r) => r.deadEnd);
+
+            if (resolved.length === 1 && liveOnly.length === 1) {
+              // Whole tree collapses to exactly one live stone, however deep.
+              navigate(`/?id=${liveOnly[0].id}&from=${tokenId}`, { replace: true });
+              return;
+            }
+
+            if (resolved.length >= 1 && (liveOnly.length >= 1 || hasDeadEnds)) {
+              setDisambig({ burned: { id: tokenId, ...stoneData }, children: resolved });
+              setFetchLoading(false);
+              return;
+            }
+          }
+          // Edge case: burned with no children recorded at all — fall through
+          // and display this record on its own, like any other stone.
         }
 
-        // ── Normal load for Active / Pending stones ──
+        // ── Normal load for Active / Pending stones (or a dead-end burned one) ──
         setStone(stoneData);
 
         const [lineageData, childIds] = await Promise.all([
@@ -433,10 +480,9 @@ export default function StoneViewer() {
         if (cancelled) return;
 
         setLineage(lineageData);
-        setChildren(childIds);
 
         if (childIds.length > 0) {
-          const details = await Promise.all(childIds.map(id => getStoneDetails(id)));
+          const details = await Promise.all(childIds.map((id) => getStoneDetails(id)));
           if (cancelled) return;
           setChildDetails(details.map((d, i) => ({ id: childIds[i], ...d })));
         }
@@ -464,38 +510,49 @@ export default function StoneViewer() {
   };
 
   const ipfsImageUrl = stone ? resolveIpfsImage(stone.ipfsUri) : null;
-  const statusCfg   = stone ? (STATUS_CONFIG[stone.status] || STATUS_CONFIG[0]) : null;
-  const stateStyle  = stone ? (STATE_COLORS[stone.stoneState] || STATE_COLORS['Rough']) : null;
+  const statusCfg  = stone ? statusCfgFor(stone.status) : null;
+  const StatusIcon = statusCfg?.icon;
+
+  const redirectedFromStone = redirectedFrom
+    ? lineage.find((s) => s.id === parseInt(redirectedFrom, 10))
+    : null;
+  const parentStone = stone && stone.parentTokenId
+    ? lineage.find((s) => s.id === stone.parentTokenId)
+    : null;
 
   return (
-    <div className="max-w-3xl mx-auto px-4 py-6">
-      {/* ── SEARCH BAR ── */}
-      <div className="mb-10">
-        <div className="text-center mb-8">
-          <h1 className="text-4xl font-extrabold text-[var(--color-text-primary)] tracking-tight mb-3">
-            Verify <span className="gradient-text">Gemstone</span> Authenticity
+    <div className="max-w-3xl lg:max-w-4xl mx-auto px-4 sm:px-6 py-6 sm:py-10">
+      {/* ── HERO + SEARCH ── */}
+      <div className="mb-9 sm:mb-12">
+        <div className="text-center mb-7 sm:mb-9">
+          <span className="eyebrow mb-4">Blockchain Provenance</span>
+          <h1 className="text-3xl sm:text-4xl font-bold text-[var(--color-text-primary)] tracking-tight mb-3">
+            Verify <span className="gradient-text">Gemstone</span>
           </h1>
-          <p className="text-[var(--color-text-muted)] text-sm max-w-md mx-auto">
-            Enter a stone ID or scan the QR code on your physical certificate to verify its blockchain provenance
+          <p className="text-[var(--color-text-secondary)] text-sm sm:text-base max-w-sm mx-auto leading-relaxed">
+            Enter a stone ID, or scan the QR code on your certificate
           </p>
         </div>
 
-        <form onSubmit={handleSearch} className="flex gap-3 max-w-xl mx-auto">
+        <form onSubmit={handleSearch} className="flex flex-col sm:flex-row gap-3 max-w-xl mx-auto">
           <div className="flex-1 relative">
             <Search size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)]" />
             <input
               id="stone-search-input"
               type="text"
+              inputMode="numeric"
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
               placeholder="Enter Stone ID (e.g. 42)"
-              className="input pl-11"
+              aria-label="Stone ID to verify"
+              className="input pl-11 py-3.5"
+              style={{ fontSize: '16px' }}
             />
           </div>
           <button
             id="stone-search-btn"
             type="submit"
-            className="btn btn-primary px-6"
+            className="btn btn-primary px-7 py-3.5 text-base"
           >
             Verify
           </button>
@@ -504,25 +561,26 @@ export default function StoneViewer() {
 
       {/* ── WELCOME STATE ── */}
       {!tokenId && !error && (
-        <div className="text-center py-20 animate-fade-in">
-          <div className="w-20 h-20 mx-auto mb-6 rounded-2xl bg-[var(--color-bg-elevated)] border border-[var(--color-border-default)] flex items-center justify-center">
-            <Diamond size={36} className="text-[var(--color-text-muted)]" />
+        <div className="text-center py-10 sm:py-14 animate-fade-in">
+          <div className="w-20 h-20 mx-auto mb-6 rounded-3xl bg-[var(--color-accent-glow)] border border-[var(--color-accent-ring)] flex items-center justify-center animate-float-slow">
+            <Diamond size={38} className="text-[var(--color-accent)]" />
           </div>
-          <h3 className="text-xl font-bold text-[var(--color-text-primary)] mb-2">Ready to Verify</h3>
-          <p className="text-[var(--color-text-muted)] text-sm max-w-sm mx-auto">
-            Enter a stone ID above to verify its authenticity and view its complete provenance history on the blockchain.
+          <h3 className="text-xl font-bold text-[var(--color-text-primary)] mb-2 tracking-tight">Ready to Verify</h3>
+          <p className="text-[var(--color-text-secondary)] text-sm max-w-xs mx-auto leading-relaxed">
+            Enter a stone ID above to see its authenticity and full history.
           </p>
 
-          <div className="mt-10 grid grid-cols-1 sm:grid-cols-3 gap-4 max-w-lg mx-auto">
+          <div className="mt-9 grid grid-cols-3 gap-3 max-w-md mx-auto">
             {[
-              { icon: ShieldCheck, label: 'Tamper-proof',   desc: 'Blockchain verified' },
-              { icon: GitBranch,   label: 'Full Lineage',   desc: 'Complete history' },
-              { icon: FileCheck,   label: 'NGJA Certified', desc: 'Official authority' },
+              { icon: ShieldCheck, label: 'Tamper-proof' },
+              { icon: GitBranch,   label: 'Full Lineage' },
+              { icon: FileCheck,   label: 'Lab certified' },
             ].map((item, i) => (
               <div key={i} className="card p-4 text-center">
-                <item.icon size={20} className="text-[var(--color-text-primary)] mx-auto mb-2" />
-                <p className="text-[var(--color-text-primary)] text-xs font-semibold">{item.label}</p>
-                <p className="text-[var(--color-text-muted)] text-[10px] mt-0.5">{item.desc}</p>
+                <div className="w-10 h-10 mx-auto mb-2.5 rounded-xl bg-[var(--color-accent-glow)] border border-[var(--color-accent-ring)] flex items-center justify-center">
+                  <item.icon size={18} className="text-[var(--color-accent)]" />
+                </div>
+                <p className="text-[var(--color-text-primary)] text-xs font-bold leading-tight">{item.label}</p>
               </div>
             ))}
           </div>
@@ -534,7 +592,7 @@ export default function StoneViewer() {
         <div className="alert alert-error animate-scale-in">
           <AlertTriangle size={18} className="flex-shrink-0 mt-0.5" />
           <div>
-            <p className="font-bold text-red-300">{error}</p>
+            <p className="font-bold text-[var(--color-danger)] text-sm">{error}</p>
             <p className="text-red-400/70 text-xs mt-1">Please check the ID and try again</p>
           </div>
         </div>
@@ -543,7 +601,7 @@ export default function StoneViewer() {
       {/* ── LOADING ── */}
       {tokenId && fetchLoading && <Spinner />}
 
-      {/* ── NEW: DISAMBIGUATION VIEW (burned stone, multiple children) ── */}
+      {/* ── DISAMBIGUATION VIEW: cut stone, resolved to 2+ live stones ── */}
       {disambig && !fetchLoading && (
         <DisambiguationView
           burned={disambig.burned}
@@ -556,70 +614,73 @@ export default function StoneViewer() {
       {stone && !fetchLoading && (
         <div className="space-y-6 animate-slide-up">
 
-          {/* Back button */}
-          {lineage.length > 1 && (
-            <button 
-              onClick={() => navigate(`/?id=${stone.parentTokenId}`)}
+          {/* Back to parent — opens a snapshot, doesn't bounce you away */}
+          {parentStone && (
+            <button
+              onClick={() => setModalStone(parentStone)}
               className="btn btn-ghost btn-sm text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
             >
               <ArrowLeft size={14} />
-              View Parent Stone #{stone.parentTokenId}
+              Cut from Stone #{stone.parentTokenId}
             </button>
           )}
 
-          {/* NEW: Redirected-from info banner */}
+          {/* Redirected-from info banner */}
           {redirectedFrom && (
             <div className="alert alert-info flex items-start gap-3">
               <Info size={16} className="flex-shrink-0 mt-0.5" />
-              <div className="flex-1">
-                <p className="font-semibold text-sm">Stone #{redirectedFrom} was transformed into this stone</p>
-                <p className="text-xs mt-0.5 opacity-70">
-                  The original token was burned when it was cut.{' '}
+              <div className="flex-1 min-w-0">
+                <p className="font-semibold text-sm">Stone #{redirectedFrom} was cut — this is the current result</p>
+                {redirectedFromStone && (
                   <button
-                    onClick={() => navigate(`/?id=${redirectedFrom}`)}
-                    className="underline underline-offset-2 hover:opacity-100 opacity-80"
+                    onClick={() => setModalStone(redirectedFromStone)}
+                    className="underline underline-offset-2 hover:opacity-100 opacity-80 text-xs mt-1"
                   >
                     View original record
                   </button>
-                </p>
+                )}
               </div>
             </div>
           )}
 
           {/* Status Banner */}
-          <StatusBanner status={stone.status} />
+          <div className={`status-hero status-hero--${stone.status === 0 ? 'active' : stone.status === 1 ? 'pending' : 'burned'}`}>
+            <div className="status-hero-icon">
+              <StatusIcon size={22} />
+            </div>
+            <div>
+              <h4 className="text-base">{statusCfg.plain}</h4>
+              <p className="text-sm">{statusCfg.sub}</p>
+            </div>
+          </div>
 
           {/* ── STONE HEADER CARD ── */}
-          <div className="card-elevated">
-            <div className="flex items-start gap-5">
-              <div className="w-16 h-16 rounded-2xl bg-[var(--color-bg-hover)] border border-[var(--color-border-default)] flex items-center justify-center flex-shrink-0">
-                <Diamond size={28} className="text-[var(--color-text-primary)]" />
+          <div className="card-elevated p-6 sm:p-7">
+            <div className="flex items-start gap-4">
+              <div className="w-16 h-16 rounded-2xl bg-[var(--color-accent-glow)] border border-[var(--color-accent-ring)] flex items-center justify-center flex-shrink-0">
+                <Diamond size={28} className="text-[var(--color-accent)]" />
               </div>
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-3 flex-wrap mb-1">
-                  {/* CHANGED: stoneState as primary heading, token ID as secondary */}
-                  <h2 className="text-2xl font-extrabold text-[var(--color-text-primary)]">
-                    {stone.stoneState}{' '}
-                    <span className="text-[var(--color-text-muted)] font-semibold text-lg">#{tokenId}</span>
+                <div className="flex items-center gap-2 flex-wrap mb-1.5">
+                  <h2 className="text-2xl sm:text-3xl font-bold text-[var(--color-text-primary)] tracking-tight">
+                    {stone.stoneState} <span className="text-[var(--color-text-muted)] font-semibold text-base">#{tokenId}</span>
                   </h2>
                   <span className={`badge ${statusCfg.badge}`}>{statusCfg.label}</span>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className={`px-3 py-1 rounded-xl text-sm font-bold border ${stateStyle.bg} ${stateStyle.text} ${stateStyle.border}`}>
-                    {stone.stoneState}
-                  </span>
-                  <span className="text-[var(--color-text-muted)] text-sm">-</span>
-                  <span className="text-[var(--color-text-secondary)] text-sm">{formatDate(stone.timestamp)}</span>
-                </div>
+                <p className="text-[var(--color-text-secondary)] text-sm">{formatDate(stone.timestamp)}</p>
               </div>
             </div>
 
             <div className="divider my-5" />
 
-            {/* Details Grid */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8">
-              <DetailRow label="Weight"     value={formatWeight(stone.weight)}                                                 icon={Weight} />
-              <DetailRow label="Stone State" value={stone.stoneState}                                                         icon={Gem} />
+            {/* Weight as the hero stat — the number a buyer actually cares about */}
+            <div className="flex items-baseline gap-2 mb-5">
+              <span className="text-4xl font-bold text-[var(--color-text-primary)] tracking-tight">{formatWeight(stone.weight)}</span>
+              <span className="text-sm text-[var(--color-text-muted)] font-medium">carat weight</span>
+            </div>
+
+            <div className="rounded-2xl overflow-hidden border border-[var(--color-border-subtle)]">
+              <DetailRow label="Stage"      value={stone.stoneState}                                                         icon={Gem} />
               <DetailRow label="Certified"  value={formatDate(stone.timestamp)}                                               icon={Clock} />
               <DetailRow label="Custodian"  value={shortAddr(stone.custodian)}                                                icon={User} mono />
               <DetailRow label="Parent ID"  value={stone.parentTokenId === 0 ? 'Genesis (None)' : `#${stone.parentTokenId}`} icon={GitBranch} />
@@ -629,11 +690,13 @@ export default function StoneViewer() {
 
           {/* ── GEM IMAGE ── */}
           {ipfsImageUrl && (
-            <div className="card">
-              <h3 className="section-title mb-5 flex items-center gap-2">
-                <Diamond size={18} className="text-[var(--color-text-primary)]" />
-                Certificate Image
-              </h3>
+            <div className="card p-6 sm:p-7">
+              <div className="flex items-center gap-3 mb-5">
+                <div className="w-10 h-10 rounded-xl bg-[var(--color-accent-glow)] border border-[var(--color-accent-ring)] flex items-center justify-center">
+                  <Diamond size={18} className="text-[var(--color-accent)]" />
+                </div>
+                <h3 className="text-base font-bold text-[var(--color-text-primary)]">Certificate Image</h3>
+              </div>
               <GemImage src={ipfsImageUrl} alt={`${stone.stoneState} stone #${tokenId}`} />
               <div className="mt-4 flex justify-center">
                 <a
@@ -649,66 +712,92 @@ export default function StoneViewer() {
             </div>
           )}
 
-          {/* ── PROVENANCE TIMELINE ── */}
-          <div className="card">
-            <h3 className="section-title mb-6 flex items-center gap-2">
-              <GitBranch size={18} className="text-[var(--color-text-primary)]" />
-              Provenance Timeline
-            </h3>
+          {/* ── PROVENANCE JOURNEY ── */}
+          <div className="card p-6 sm:p-7">
+            <div className="flex items-center gap-3 mb-5">
+              <div className="w-10 h-10 rounded-xl bg-[var(--color-accent-glow)] border border-[var(--color-accent-ring)] flex items-center justify-center">
+                <GitBranch size={18} className="text-[var(--color-accent)]" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-[var(--color-text-primary)]">Provenance Timeline</h3>
+                <p className="text-sm text-[var(--color-text-muted)] mt-0.5">Tap any step to see that stone's details</p>
+              </div>
+            </div>
 
             {lineage.length > 0 ? (
               <div className="relative">
-                {lineage.map((s, i) => (
-                  <TimelineCard 
-                    key={s.id} 
-                    stone={s} 
-                    isCurrent={s.id === tokenId}
-                    isFirst={i === 0}
-                  />
-                ))}
+                <div className="journey-legend text-xs">
+                  <span className="journey-legend-item"><span className="journey-legend-dot legend-active" /> Active</span>
+                  <span className="journey-legend-item"><span className="journey-legend-dot legend-pending" /> Pending</span>
+                  <span className="journey-legend-item"><span className="journey-legend-dot legend-burned" /> Cut</span>
+                </div>
+                <div className="journey">
+                  <div className="journey-line" />
+                  {lineage.map((s, i) => (
+                    <TimelineNode
+                      key={s.id}
+                      stone={s}
+                      isCurrent={s.id === tokenId}
+                      isFirst={i === 0}
+                      index={i}
+                      onOpen={setModalStone}
+                    />
+                  ))}
+                </div>
               </div>
             ) : (
-              <div className="empty-state">
-                <div className="empty-state-icon">
-                  <Diamond size={28} className="text-[var(--color-text-muted)]" />
+              <div className="empty-state py-10">
+                <div className="empty-state-icon w-14 h-14 mb-3">
+                  <Diamond size={24} className="text-[var(--color-accent)]" />
                 </div>
-                <p className="text-[var(--color-text-secondary)] font-medium text-sm">Genesis Stone</p>
-                <p className="text-[var(--color-text-muted)] text-xs mt-1">This stone has no prior history on the blockchain</p>
+                <p className="text-[var(--color-text-secondary)] font-semibold text-sm">Genesis Stone</p>
+                <p className="text-[var(--color-text-muted)] text-xs mt-1">No prior history — it all starts here</p>
               </div>
             )}
           </div>
 
-          {/* ── CHILD STONES ── */}
+          {/* ── CHILD STONES (defensive: normally empty for Active/Pending) ── */}
           {childDetails.length > 0 && (
-            <div className="card">
-              <h3 className="section-title mb-2 flex items-center gap-2">
-                <Scissors size={18} className="text-[var(--color-text-secondary)]" />
-                Resulting Stones
-              </h3>
-              <p className="section-sub mb-5">This stone was cut into the following gemstones. Click to view each certificate.</p>
+            <div className="card p-6 sm:p-7">
+              <div className="flex items-center gap-3 mb-5">
+                <div className="w-10 h-10 rounded-xl bg-[var(--color-accent-glow)] border border-[var(--color-accent-ring)] flex items-center justify-center">
+                  <Scissors size={18} className="text-[var(--color-accent)]" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-[var(--color-text-primary)]">Resulting Stones</h3>
+                  <p className="text-sm text-[var(--color-text-muted)] mt-0.5">Tap to view each certificate</p>
+                </div>
+              </div>
               <div className="space-y-3">
                 {childDetails.map((child) => (
-                  <ChildCard key={child.id} stone={child} navigate={navigate} />
+                  <ResultCard key={child.id} stone={child} navigate={navigate} />
                 ))}
               </div>
             </div>
           )}
 
           {/* ── QR CODE ── */}
-          <div className="card">
-            <h3 className="section-title mb-6 flex items-center gap-2">
-              <FileCheck size={18} className="text-[var(--color-text-primary)]" />
-              Certificate QR Code
-            </h3>
-            <div className="flex flex-col items-center">
-              <QRGenerator tokenId={tokenId} />
+          <div className="card p-6 sm:p-7">
+            <div className="flex items-center gap-3 mb-5">
+              <div className="w-10 h-10 rounded-xl bg-[var(--color-accent-glow)] border border-[var(--color-accent-ring)] flex items-center justify-center">
+                <FileCheck size={18} className="text-[var(--color-accent)]" />
+              </div>
+              <h3 className="text-base font-bold text-[var(--color-text-primary)]">Certificate QR Code</h3>
+            </div>
+            <div className="qr-card">
+              <div className="qr-frame">
+                <QRGenerator tokenId={tokenId} />
+              </div>
               <p className="text-[var(--color-text-muted)] text-xs text-center mt-4 max-w-xs">
-                Scan this QR code to verify this stone on any device — no wallet or app installation required
+                Scan to verify on any device — no wallet needed
               </p>
             </div>
           </div>
         </div>
       )}
+
+      {/* ── SNAPSHOT MODAL (timeline node / parent / redirected-from) ── */}
+      <StoneSnapshotModal stone={modalStone} onClose={() => setModalStone(null)} />
     </div>
   );
 }

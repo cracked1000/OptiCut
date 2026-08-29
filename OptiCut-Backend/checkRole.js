@@ -3,7 +3,10 @@ import fs from "fs";
 import { fileURLToPath } from 'url';
 import path from 'path';
 
-const rpcUrl = "https://polygon-amoy.g.alchemy.com/v2/9Fhjjb3J1ADJds89SZpKs";
+import "dotenv/config";
+const rpcUrl = process.env.ALCHEMY_API_KEY
+  ? `https://polygon-amoy.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`
+  : "https://rpc-amoy.polygon.technology/";
 const provider = new ethers.JsonRpcProvider(rpcUrl);
 
 const contractAddress = "0x686fC560f47aC52e7750A71f8A971298124Ecb87";
@@ -34,3 +37,5 @@ async function main() {
   }
 }
 main();
+
+

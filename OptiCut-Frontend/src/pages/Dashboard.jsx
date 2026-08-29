@@ -6,7 +6,7 @@ import QRGenerator from '../components/QRGenerator';
 import { 
   Plus, Lock, Scissors, Gem, Upload, X, CheckCircle2, 
   AlertTriangle, Loader2, ChevronDown, ChevronUp, Trash2,
-  ArrowRight, FileCheck, Clock, Flame, FlaskConical, Diamond
+  ArrowRight, FileCheck, Clock, Flame, FlaskConical, Diamond, Info
 } from 'lucide-react';
 
 const STONE_STATES = ['Rough', 'Preform', 'Cut', 'Polished'];
@@ -202,12 +202,19 @@ export default function Dashboard() {
 
   const [reqTokenId, setReqTokenId] = useState('');
   const [parentId, setParentId] = useState('');
-  const [childInputs, setChildInputs] = useState([{ weight: '', state: 'Cut', uri: '' }]);
+  const emptyChild = () => ({ weight: '', state: 'Cut', uri: '', file: null, previewUrl: null, uploading: false, uploadMsg: null });
+  const [childInputs, setChildInputs] = useState([emptyChild()]);
 
   const [txHash, setTxHash] = useState('');
   const [errorMSG, setErrorMSG] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  // Separate submitting flags per form — so minting doesn't disable the
+  // request/complete buttons and vice-versa (previous shared flag was a UX bug).
+  const [minting, setMinting] = useState(false);
+  const [requesting, setRequesting] = useState(false);
+  const [completing, setCompleting] = useState(false);
   const [toast, setToast] = useState(null);
+
+  const MAX_CHILDREN = 8;
 
   const [myStones, setMyStones] = useState([]);
   const [stonesLoading, setStonesLoading] = useState(false);
@@ -233,17 +240,67 @@ export default function Dashboard() {
     loadMyStones();
   }, [account, txHash]);
 
+  // Derived quick stats for the header (display only — no logic change)
+  const stoneCount = myStones.length;
+  const activeCount = myStones.filter(s => s.status === 0).length;
+  const pendingCount = myStones.filter(s => s.status === 1).length;
+
   const showToast = (message, type = 'success') => {
     setToast({ message, type });
   };
 
-  const addChildRow = () => setChildInputs([...childInputs, { weight: '', state: 'Cut', uri: '' }]);
-  const removeChildRow = (idx) => setChildInputs(childInputs.filter((_, i) => i !== idx));
+  const addChildRow = () => setChildInputs(prev => [...prev, emptyChild()]);
+
+  const removeChildRow = (idx) => {
+    setChildInputs(prev => {
+      const target = prev[idx];
+      if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((_, i) => i !== idx);
+    });
+  };
 
   const updateChild = (index, field, value) => {
-    const updated = [...childInputs];
-    updated[index][field] = value;
-    setChildInputs(updated);
+    setChildInputs(prev => {
+      const updated = [...prev];
+      updated[index] = { ...updated[index], [field]: value };
+      return updated;
+    });
+  };
+
+  // Merge multiple fields into a single child row in one state update
+  // (avoids clobbering when several fields change together, e.g. file + previewUrl)
+  const updateChildFields = (index, fields) => {
+    setChildInputs(prev => {
+      const updated = [...prev];
+      updated[index] = { ...updated[index], ...fields };
+      return updated;
+    });
+  };
+
+  const handleChildFileChange = (idx, e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    updateChildFields(idx, { file, previewUrl: URL.createObjectURL(file), uploadMsg: null });
+  };
+
+  const handleChildRemoveImage = (idx) => {
+    const child = childInputs[idx];
+    if (child?.previewUrl) URL.revokeObjectURL(child.previewUrl);
+    updateChildFields(idx, { file: null, previewUrl: null, uploadMsg: null });
+  };
+
+  const handleChildUploadToIPFS = async (idx) => {
+    const child = childInputs[idx];
+    if (!child?.file) return;
+    updateChildFields(idx, { uploading: true, uploadMsg: null });
+    try {
+      const ipfsUri = await uploadToPinata(child.file);
+      updateChildFields(idx, { uri: ipfsUri, uploading: false, uploadMsg: { type: 'success', text: 'Image uploaded to IPFS' } });
+      showToast(`Child #${idx + 1} image uploaded to IPFS`, 'success');
+    } catch (err) {
+      updateChildFields(idx, { uploading: false, uploadMsg: { type: 'error', text: err.message || 'Upload failed' } });
+      showToast(err.message || 'Upload failed', 'error');
+    }
   };
 
   const handleFileChange = (e) => {
@@ -272,7 +329,7 @@ export default function Dashboard() {
 
   const handleGenesis = async (e) => {
     e.preventDefault();
-    setIsSubmitting(true); setTxHash(''); setErrorMSG('');
+    setMinting(true); setTxHash(''); setErrorMSG('');
     setMintedTokenId(null);
     try {
       const receipt = await registerGenesis(genUri, genWeight, genState);
@@ -283,17 +340,17 @@ export default function Dashboard() {
       setTxHash(receipt.hash);
       setGenUri(''); setGenWeight(''); setGenState('Rough');
       setSelectedFile(null); setPreviewUrl(null); setUploadMsg(null);
-      showToast(`Stone #${newId} minted successfully!`, 'success');
+      showToast(newId ? `Stone #${newId} minted successfully!` : 'Stone minted successfully!', 'success');
     } catch (err) { 
       setErrorMSG(err.reason || err.message);
       showToast(err.reason || err.message, 'error');
     }
-    setIsSubmitting(false);
+    setMinting(false);
   };
 
   const handleRequest = async (e) => {
     e.preventDefault();
-    setIsSubmitting(true); setTxHash(''); setErrorMSG('');
+    setRequesting(true); setTxHash(''); setErrorMSG('');
     try {
       const receipt = await requestTransformation(reqTokenId);
       setTxHash(receipt.hash);
@@ -303,26 +360,37 @@ export default function Dashboard() {
       setErrorMSG(err.reason || err.message);
       showToast(err.reason || err.message, 'error');
     }
-    setIsSubmitting(false);
+    setRequesting(false);
   };
 
   const handleComplete = async (e) => {
     e.preventDefault();
-    setIsSubmitting(true); setTxHash(''); setErrorMSG('');
+    setCompleting(true); setTxHash(''); setErrorMSG('');
     try {
       const weights = childInputs.map(c => c.weight);
       const states = childInputs.map(c => c.state);
       const uris = childInputs.map(c => c.uri);
+
+      // Friendly client-side guard before spending gas — the contract also
+      // enforces this rule, this just catches mistakes earlier.
+      if (weights.some(w => !w || isNaN(parseFloat(w)) || parseFloat(w) <= 0)) {
+        setErrorMSG('Please enter a valid weight (greater than 0) for every child stone.');
+        showToast('Please enter a valid weight for every child stone.', 'error');
+        setCompleting(false);
+        return;
+      }
+
       const receipt = await completeTransformation(parentId, weights, states, uris);
       setTxHash(receipt.hash);
       setParentId('');
-      setChildInputs([{ weight: '', state: 'Cut', uri: '' }]);
+      childInputs.forEach(c => { if (c.previewUrl) URL.revokeObjectURL(c.previewUrl); });
+      setChildInputs([emptyChild()]);
       showToast('Transformation completed successfully', 'success');
     } catch (err) { 
       setErrorMSG(err.reason || err.message);
       showToast(err.reason || err.message, 'error');
     }
-    setIsSubmitting(false);
+    setCompleting(false);
   };
 
   // ── Loading State ──
@@ -381,7 +449,7 @@ export default function Dashboard() {
 
   // ── Connected Lab View ──
   return (
-    <div className="max-w-6xl mx-auto py-6 px-4 space-y-6">
+    <div className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-8">
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
 
       <MintSuccessModal 
@@ -392,14 +460,21 @@ export default function Dashboard() {
       />
 
       <header className="text-center mb-10">
-        <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-emerald-500/5 border border-emerald-500/15 rounded-full mb-4">
-          <FlaskConical size={14} className="text-emerald-500" />
-          <span className="text-emerald-500 text-xs font-bold uppercase tracking-wider">Lab Portal</span>
-        </div>
-        <h1 className="text-3xl font-extrabold text-[var(--color-text-primary)] tracking-tight mb-3">Laboratory Dashboard</h1>
+        <span className="eyebrow mb-4"><FlaskConical size={13} /> Lab Portal</span>
+        <h1 className="text-4xl font-extrabold text-[var(--color-text-primary)] tracking-tight mb-3">
+          Laboratory <span className="gradient-text">Dashboard</span>
+        </h1>
+        <p className="text-[var(--color-text-muted)] text-sm max-w-md mx-auto mb-4">
+          Mint, cut, and manage your gemstone certificates — everything is recorded on the blockchain.
+        </p>
         <div className="flex items-center justify-center gap-3">
           <span className="mono-addr">{shortAddr(account)}</span>
           <span className="badge badge-green">Authorized Lab</span>
+        </div>
+        <div className="mt-6 flex items-center justify-center gap-3 flex-wrap">
+          <span className="chip"><span className="inline-block w-2 h-2 rounded-full bg-[var(--color-accent)] shadow-[0_0_8px_var(--color-accent)] mr-1" /> {stoneCount} registered</span>
+          <span className="chip"><span className="inline-block w-2 h-2 rounded-full bg-[var(--color-success)] mr-1" /> {activeCount} active</span>
+          <span className="chip"><span className="inline-block w-2 h-2 rounded-full bg-[var(--color-warn)] mr-1" /> {pendingCount} pending</span>
         </div>
       </header>
 
@@ -407,8 +482,8 @@ export default function Dashboard() {
         <div className="alert alert-success animate-scale-in">
           <CheckCircle2 size={18} className="flex-shrink-0 mt-0.5" />
           <div className="flex-1 min-w-0">
-            <p className="font-bold text-emerald-300 text-sm">Transaction Successful</p>
-            <p className="text-emerald-400/70 text-xs font-mono mt-1 break-all">{txHash}</p>
+            <p className="font-bold text-sm">Transaction Successful</p>
+            <p className="text-xs font-mono mt-1 break-all opacity-80">{txHash}</p>
           </div>
         </div>
       )}
@@ -417,15 +492,15 @@ export default function Dashboard() {
         <div className="alert alert-error animate-scale-in">
           <AlertTriangle size={18} className="flex-shrink-0 mt-0.5" />
           <div>
-            <p className="font-bold text-red-300">Transaction Failed</p>
-            <p className="text-red-400/70 text-xs mt-1">{errorMSG}</p>
+            <p className="font-bold">Transaction Failed</p>
+            <p className="text-xs mt-1 opacity-80">{errorMSG}</p>
           </div>
         </div>
       )}
 
-      <div className="dashboard-grid">
-        <div className="dashboard-sidebar space-y-6">
-          <SectionCard title="Register New Stone" subtitle="Mint a new blockchain certificate" icon={Plus}>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
+        <div className="space-y-8 min-w-0">
+          <SectionCard title="Register New Stone" subtitle="Mint a new blockchain certificate" icon={Plus} defaultOpen={true}>
             <form onSubmit={handleGenesis} className="space-y-5">
               <div>
                 <label className="label">Certificate Image</label>
@@ -463,12 +538,20 @@ export default function Dashboard() {
               <div>
                 <label className="label">IPFS Certificate URI</label>
                 <input id="gen-uri" type="text" required value={genUri} onChange={(e) => setGenUri(e.target.value)} className="input" placeholder="ipfs://Qm... (auto-filled after upload)" />
+                <p className="hint">
+                  <Info size={14} />
+                  Upload an image above to fill this automatically, or paste any ipfs:// URI.
+                </p>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="label">Weight (carats)</label>
                   <input id="gen-weight" type="number" required min="0.01" step="0.01" value={genWeight} onChange={(e) => setGenWeight(e.target.value)} className="input" placeholder="e.g. 5.20" />
+                  <p className="hint">
+                    <Info size={14} />
+                    Weight in carats, e.g. 5.20. Stored exactly as entered.
+                  </p>
                 </div>
                 <div>
                   <label className="label">Stone State</label>
@@ -478,29 +561,39 @@ export default function Dashboard() {
                 </div>
               </div>
 
-              <button id="mint-genesis-btn" type="submit" disabled={isSubmitting} className="btn btn-primary w-full btn-lg">
-                {isSubmitting ? <><Loader2 size={18} className="animate-spin" />Minting...</> : <><Gem size={18} />Mint Genesis Token</>}
+              <button id="mint-genesis-btn" type="submit" disabled={minting} className="btn btn-primary w-full btn-lg">
+                {minting ? <><Loader2 size={18} className="animate-spin" />Minting...</> : <><Gem size={18} />Mint Genesis Token</>}
               </button>
             </form>
           </SectionCard>
+        </div>
 
-          <SectionCard title="Request Transformation" subtitle="Lock a stone for transformation" icon={Lock} defaultOpen={false}>
+        <div className="space-y-8 min-w-0">
+          <SectionCard title="Request Transformation" subtitle="Lock a stone for transformation" icon={Lock} defaultOpen={true}>
             <form onSubmit={handleRequest} className="space-y-4">
               <div>
                 <label className="label">Token ID to Transform</label>
                 <input id="req-token-id" type="number" required min="1" value={reqTokenId} onChange={(e) => setReqTokenId(e.target.value)} className="input" placeholder="Enter Token ID" />
+                <p className="hint">
+                  <Info size={14} />
+                  Locks the stone so it cannot be moved while it is being cut. You must own it.
+                </p>
               </div>
-              <button id="request-transform-btn" type="submit" disabled={isSubmitting} className="btn btn-secondary w-full">
-                {isSubmitting ? <><Loader2 size={16} className="animate-spin" />Processing...</> : <><Lock size={16} />Lock Token (Pending)</>}
+              <button id="request-transform-btn" type="submit" disabled={requesting} className="btn btn-secondary w-full">
+                {requesting ? <><Loader2 size={16} className="animate-spin" />Processing...</> : <><Lock size={16} />Lock Token (Pending)</>}
               </button>
             </form>
           </SectionCard>
 
-          <SectionCard title="Complete Transformation" subtitle="Burn parent & mint children" icon={Scissors} defaultOpen={false}>
+          <SectionCard title="Complete Transformation" subtitle="Burn parent & mint children" icon={Scissors} defaultOpen={true}>
             <form onSubmit={handleComplete} className="space-y-5">
               <div>
                 <label className="label">Parent Token ID</label>
                 <input id="parent-token-id" type="number" required min="1" value={parentId} onChange={(e) => setParentId(e.target.value)} className="input" placeholder="ID of stone being cut" />
+                <p className="hint">
+                  <Info size={14} />
+                  The stone you locked in the previous step. Its total weight is split across the children below.
+                </p>
               </div>
 
               <div className="space-y-3">
@@ -520,6 +613,39 @@ export default function Dashboard() {
                       )}
                     </div>
 
+                    <div className="mb-3">
+                      <label className="text-[10px] font-bold text-[var(--color-text-muted)] uppercase tracking-wider mb-1.5 block">Certificate Image</label>
+                      <div className="relative">
+                        <input id={`child-image-upload-${idx}`} type="file" accept="image/jpeg,image/png" onChange={(e) => handleChildFileChange(idx, e)} className="hidden" />
+                        {!child.previewUrl ? (
+                          <label htmlFor={`child-image-upload-${idx}`} className="flex flex-col items-center justify-center py-6 px-4 bg-[var(--color-bg-secondary)] border-2 border-dashed border-[var(--color-border-default)] rounded-xl cursor-pointer hover:border-[var(--color-border-hover)] hover:bg-[var(--color-bg-hover)] transition-all group">
+                            <Upload size={22} className="text-[var(--color-text-muted)] group-hover:text-[var(--color-text-primary)] transition-colors mb-2" />
+                            <p className="text-[var(--color-text-secondary)] text-xs font-medium">Click to upload gem image</p>
+                            <p className="text-[var(--color-text-muted)] text-[10px] mt-0.5">JPG or PNG, max 10MB</p>
+                          </label>
+                        ) : (
+                          <div className="relative">
+                            <img src={child.previewUrl} alt="Preview" className="w-full h-32 object-cover rounded-xl border border-[var(--color-border-default)]" />
+                            <button type="button" onClick={() => handleChildRemoveImage(idx)} className="absolute top-2 right-2 p-1.5 bg-black/60 hover:bg-black/80 rounded-lg transition">
+                              <X size={12} className="text-white" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {child.previewUrl && (
+                        <button type="button" onClick={() => handleChildUploadToIPFS(idx)} disabled={child.uploading} className="btn btn-sm btn-secondary mt-2 w-full">
+                          {child.uploading ? <><Loader2 size={14} className="animate-spin" />Uploading...</> : <><Upload size={14} />Upload to IPFS</>}
+                        </button>
+                      )}
+
+                      {child.uploadMsg && (
+                        <p className={`mt-1.5 text-[11px] font-medium ${child.uploadMsg.type === 'success' ? 'text-emerald-500' : 'text-red-400'}`}>
+                          {child.uploadMsg.text}
+                        </p>
+                      )}
+                    </div>
+
                     <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
                       <div className="sm:col-span-4">
                         <label className="text-[10px] font-bold text-[var(--color-text-muted)] uppercase tracking-wider mb-1.5 block">Weight</label>
@@ -533,27 +659,50 @@ export default function Dashboard() {
                       </div>
                       <div className="sm:col-span-5">
                         <label className="text-[10px] font-bold text-[var(--color-text-muted)] uppercase tracking-wider mb-1.5 block">IPFS URI</label>
-                        <input type="text" required value={child.uri} onChange={(e) => updateChild(idx, 'uri', e.target.value)} className="input py-2.5 text-sm" placeholder="ipfs://..." />
+                        <input type="text" required value={child.uri} onChange={(e) => updateChild(idx, 'uri', e.target.value)} className="input py-2.5 text-sm" placeholder="ipfs://... (auto-filled after upload)" />
                       </div>
                     </div>
                   </div>
                 ))}
 
-                <button type="button" onClick={addChildRow} id="add-child-btn" className="btn btn-ghost btn-sm w-full border border-dashed border-[var(--color-border-default)] hover:border-[var(--color-text-primary)]/30">
+                <button
+                  type="button"
+                  onClick={addChildRow}
+                  id="add-child-btn"
+                  disabled={childInputs.length >= MAX_CHILDREN}
+                  className="btn btn-ghost btn-sm w-full border border-dashed border-[var(--color-border-default)] hover:border-[var(--color-accent-ring)] disabled:opacity-40"
+                >
                   <Plus size={14} />
                   Add Child Stone
                 </button>
+                {childInputs.length >= MAX_CHILDREN && (
+                  <p className="hint justify-center">
+                    <Info size={14} />
+                    Maximum of {MAX_CHILDREN} child stones per cut.
+                  </p>
+                )}
               </div>
 
-              <button id="complete-transform-btn" type="submit" disabled={isSubmitting} className="btn btn-secondary w-full">
-                {isSubmitting ? <><Loader2 size={16} className="animate-spin" />Processing...</> : <><Scissors size={16} />Burn Parent & Mint Children</>}
+              <button id="complete-transform-btn" type="submit" disabled={completing} className="btn btn-secondary w-full">
+                {completing ? <><Loader2 size={16} className="animate-spin" />Processing...</> : <><Scissors size={16} />Burn Parent & Mint Children</>}
               </button>
             </form>
           </SectionCard>
         </div>
+      </div>
 
-        <div>
-          <SectionCard title="My Registered Stones" subtitle="Gemstones registered by your lab wallet" icon={Gem} defaultOpen={true}>
+      {/* ── My Registered Stones (full width) ── */}
+      <div className="card p-6 lg:p-8">
+        <div className="flex items-center gap-3 mb-6">
+          <div className="w-11 h-11 rounded-xl bg-[var(--color-accent-glow)] border border-[var(--color-accent-ring)] flex items-center justify-center">
+            <Gem size={20} className="text-[var(--color-accent)]" />
+          </div>
+          <div>
+            <h2 className="section-title">My Registered Stones</h2>
+            <p className="section-sub">Gemstones registered by your lab wallet</p>
+          </div>
+        </div>
+
             {stonesLoading ? (
               <div className="flex justify-center py-12">
                 <div className="flex flex-col items-center gap-3">
@@ -575,13 +724,15 @@ export default function Dashboard() {
             ) : myStones.length === 0 ? (
               <div className="empty-state py-12">
                 <div className="empty-state-icon">
-                  <Diamond size={28} className="text-[var(--color-text-muted)]" />
+                  <Diamond size={28} className="text-[var(--color-text-primary)]" />
                 </div>
                 <p className="text-[var(--color-text-secondary)] font-medium text-sm">No stones registered yet</p>
-                <p className="text-[var(--color-text-muted)] text-xs mt-1">Mint your first genesis token above</p>
+                <p className="text-[var(--color-text-muted)] text-xs mt-1">
+                  Every stone you mint will appear here with its live status — mint your first genesis token above.
+                </p>
               </div>
             ) : (
-              <div className="space-y-3">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {myStones.map((s) => {
                   const statusCfg = STATUS_CONFIG[s.status] || STATUS_CONFIG[0];
                   const stateStyle = STATE_STYLES[s.stoneState] || STATE_STYLES['Rough'];
@@ -589,8 +740,8 @@ export default function Dashboard() {
 
                   return (
                     <div key={s.tokenId} className="card card-interactive p-4 flex items-center gap-4 group">
-                      <div className="w-12 h-12 rounded-xl bg-[var(--color-bg-tertiary)] border border-[var(--color-border-subtle)] flex items-center justify-center flex-shrink-0">
-                        <Gem size={20} className="text-[var(--color-text-muted)] group-hover:text-[var(--color-text-primary)] transition-colors" />
+                      <div className="w-12 h-12 rounded-xl bg-[var(--color-accent-glow)] border border-[var(--color-accent-ring)] flex items-center justify-center flex-shrink-0">
+                        <Gem size={20} className="text-[var(--color-accent)]" />
                       </div>
 
                       <div className="flex-1 min-w-0">
@@ -603,24 +754,23 @@ export default function Dashboard() {
                         </div>
                         <div className="flex items-center gap-3 text-sm">
                           <span className="font-bold text-[var(--color-text-primary)]">{formatWeight(s.weight)}</span>
-                          <span className={`px-2 py-0.5 rounded-lg text-xs font-semibold border ${stateStyle.bg} ${stateStyle.text} ${stateStyle.border}`}>
+                          <span className={`px-2 py-0.5 rounded-lg text-xs font-semibold border ${stateStyle.bg}`}>
                             {s.stoneState}
                           </span>
                           <span className="text-[var(--color-text-muted)] text-xs">{formatDate(s.timestamp)}</span>
                         </div>
                       </div>
 
-                      <button onClick={() => navigate(`/?id=${s.tokenId}`)} className="p-2 hover:bg-white/5 rounded-xl transition flex-shrink-0">
-                        <ArrowRight size={18} className="text-[var(--color-text-muted)] group-hover:text-[var(--color-text-primary)] transition-colors" />
+                      <button onClick={() => navigate(`/?id=${s.tokenId}`)} className="icon-btn p-2 flex-shrink-0" aria-label={`View stone ${s.tokenId}`}>
+                        <ArrowRight size={18} className="text-[var(--color-text-muted)] group-hover:text-[var(--color-accent)] transition-colors" />
                       </button>
                     </div>
                   );
                 })}
               </div>
             )}
-          </SectionCard>
-        </div>
       </div>
     </div>
   );
 }
+
