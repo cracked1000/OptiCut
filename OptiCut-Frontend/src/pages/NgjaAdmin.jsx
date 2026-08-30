@@ -454,6 +454,138 @@ function RevokedLabsPanel({ showToast, onLabsChanged }) {
   );
 }
 
+// ── NGJA custody panel ──
+// A stone parked "under NGJA custody" (via adminReassignStone) has no other
+// screen anywhere in the app that lists it — the admin wallet holds no
+// LAB_ROLE, so it never reaches the Lab Portal dashboard that normally lists
+// stones by current custodian. Without this panel, a parked stone is only
+// findable by manually typing its token ID into the public verify page,
+// which reads exactly like the stone "disappeared." This panel closes that
+// gap by listing whatever the connected admin wallet currently holds, with
+// a one-click way to hand it on to a real lab.
+function NgjaCustodyPanel({ showToast }) {
+  const { account, getStonesForAccount, getActiveLabs, adminReassignStone } = useBlockchain();
+
+  const [stones, setStones] = useState([]);
+  const [activeLabs, setActiveLabs] = useState([]);
+  const [loadingData, setLoadingData] = useState(false);
+  const [error, setError] = useState(null);
+  const [reassignGem, setReassignGem] = useState(null);
+  const [reassignLoading, setReassignLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!account) return;
+    setLoadingData(true);
+    setError(null);
+    try {
+      const [mine, active] = await Promise.all([
+        getStonesForAccount(account),
+        getActiveLabs(),
+      ]);
+      // Only ever Active here in practice (adminReassignStone always resets
+      // status to Active), but filtering defensively in case custody was
+      // gained some other way.
+      setStones(mine.filter((s) => s.status !== 2));
+      setActiveLabs(active);
+    } catch (err) {
+      console.error('Failed to load NGJA-held stones:', err);
+      setError(friendlyError(err));
+    } finally {
+      setLoadingData(false);
+    }
+  }, [account, getStonesForAccount, getActiveLabs]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleReassign = async (destination) => {
+    if (!reassignGem) return;
+    setReassignLoading(true);
+    try {
+      await adminReassignStone(reassignGem.tokenId, destination);
+      showToast(`Gem #${reassignGem.tokenId} handed off to ${shortAddr(destination)}`, 'success');
+      setReassignGem(null);
+      await load();
+    } catch (err) {
+      showToast(friendlyError(err), 'error');
+    }
+    setReassignLoading(false);
+  };
+
+  if (!loadingData && !error && stones.length === 0) {
+    // Nothing parked under NGJA right now — no need to take up space with
+    // an empty-state card the admin has to scroll past every visit.
+    return null;
+  }
+
+  return (
+    <div className="card">
+      <ReassignDialog
+        isOpen={!!reassignGem}
+        gem={reassignGem}
+        activeLabs={activeLabs}
+        ngjaAddress={account}
+        onConfirm={handleReassign}
+        onCancel={() => setReassignGem(null)}
+        isLoading={reassignLoading}
+      />
+
+      <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center">
+            <Shield size={18} className="text-blue-400" />
+          </div>
+          <div>
+            <h2 className="section-title text-base">Stones in NGJA Custody</h2>
+            <p className="section-sub">
+              Parked here after a rescue reassignment — not held by any lab right now.
+            </p>
+          </div>
+        </div>
+        <button onClick={load} disabled={loadingData} className="btn btn-ghost btn-sm">
+          <RefreshCw size={14} className={loadingData ? 'animate-spin' : ''} />
+          Refresh
+        </button>
+      </div>
+
+      {error ? (
+        <div className="alert alert-error">
+          <AlertTriangle size={16} />
+          <div>
+            <p className="font-bold text-sm">Could not load NGJA-held stones</p>
+            <p className="text-xs text-red-400/70 mt-1">{error}</p>
+          </div>
+          <button onClick={load} className="btn btn-sm btn-danger ml-auto">Retry</button>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {stones.map((gem) => (
+            <div key={gem.tokenId} className="flex items-center gap-3 p-4 bg-[var(--color-bg-tertiary)] rounded-xl border border-[var(--color-border-subtle)]">
+              <div className="w-8 h-8 rounded-lg bg-[var(--color-bg-hover)] flex items-center justify-center flex-shrink-0">
+                <Gem size={15} className="text-[var(--color-text-muted)]" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-[var(--color-text-primary)]">Gem #{gem.tokenId}</p>
+                <p className="text-xs text-[var(--color-text-muted)]">
+                  {(gem.weight / 100).toFixed(2)} ct · {gem.stoneState || '—'} · {gem.isHeated ? 'Heated' : 'Natural'}
+                </p>
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <a href={`/?id=${gem.tokenId}`} target="_blank" rel="noopener noreferrer" className="btn btn-secondary btn-sm" title="Open on the public verify page">
+                  View
+                </a>
+                <button onClick={() => setReassignGem(gem)} className="btn btn-primary btn-sm">
+                  <Send size={13} />
+                  Hand to a lab
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main Component ──
 export default function NgjaAdmin() {
   const { account, connect, isNgjaAdmin, loading, grantLab, revokeLab, getAuthorizedLabs, getActiveLabs } = useBlockchain();
@@ -858,6 +990,9 @@ export default function NgjaAdmin() {
           )}
         </div>
       </div>
+
+      {/* ✅ NEW: stones parked under NGJA custody after a rescue reassignment */}
+      <NgjaCustodyPanel showToast={showToast} />
 
       {/* ✅ NEW: Revoked labs & gem recovery */}
       <RevokedLabsPanel showToast={showToast} onLabsChanged={loadLabs} />
