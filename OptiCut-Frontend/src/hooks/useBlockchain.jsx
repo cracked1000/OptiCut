@@ -321,6 +321,8 @@ export function BlockchainProvider({ children }) {
       status: Number(stone.status),
       timestamp: Number(stone.timestamp),
       custodian: stone.custodian,
+      isHeated: Boolean(stone.isHeated),
+      labComments: stone.labComments,
     };
   }, []);
 
@@ -341,10 +343,17 @@ export function BlockchainProvider({ children }) {
     return chain;
   }, [getStoneDetails]);
 
-  const registerGenesis = useCallback(async (uri, weight, stoneState) => {
+  const registerGenesis = useCallback(async (uri, weight, stoneState, isHeated, labComments) => {
     if (!contract || !isLab) throw new Error('Unauthorized');
     const overrides = await txOverrides(account);
-    const tx = await contract.registerGenesis(uri, BigInt(Math.round(parseFloat(weight) * 100)), stoneState, overrides);
+    const tx = await contract.registerGenesis(
+      uri,
+      BigInt(Math.round(parseFloat(weight) * 100)),
+      stoneState,
+      Boolean(isHeated),
+      labComments || '',
+      overrides
+    );
     return waitForTx(tx);
   }, [contract, isLab, account]);
 
@@ -355,7 +364,7 @@ export function BlockchainProvider({ children }) {
     return waitForTx(tx);
   }, [contract, isLab, account]);
 
-  const completeTransformation = useCallback(async (parentId, newWeights, newStates, newUris) => {
+  const completeTransformation = useCallback(async (parentId, newWeights, newStates, newUris, newIsHeated, newLabComments) => {
     if (!contract || !isLab) throw new Error('Unauthorized');
     const overrides = await txOverrides(account, GAS_LIMIT * 2n);
     const tx = await contract.completeTransformation(
@@ -363,6 +372,8 @@ export function BlockchainProvider({ children }) {
       newWeights.map((w) => BigInt(Math.round(parseFloat(w) * 100))),
       newStates,
       newUris,
+      newIsHeated.map((h) => Boolean(h)),
+      newLabComments.map((c) => c || ''),
       overrides
     );
     return waitForTx(tx);
@@ -462,6 +473,7 @@ export function BlockchainProvider({ children }) {
           status: Number(s.status),      // 0 Active, 1 Pending, 2 Burned
           timestamp: Number(s.timestamp),
           custodian: s.custodian,
+          isHeated: Boolean(s.isHeated),
           // "still held by this revoked lab" — the case that needs rescuing
           heldByLab: s.custodian && s.custodian.toLowerCase() === lab.address.toLowerCase(),
         };
@@ -544,6 +556,7 @@ export function BlockchainProvider({ children }) {
             stoneState: s.stoneState,
             status: Number(s.status),
             timestamp: Number(s.timestamp),
+            isHeated: Boolean(s.isHeated),
           });
         }
       }
@@ -595,4 +608,3 @@ export function useBlockchain() {
   if (!ctx) throw new Error('useBlockchain must be inside <BlockchainProvider>');
   return ctx;
 }
-

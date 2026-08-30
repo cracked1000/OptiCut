@@ -2,10 +2,12 @@ import { useState, useEffect } from 'react';
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom';
 import { useBlockchain } from '../hooks/useBlockchain';
 import QRGenerator from '../components/QRGenerator';
+import QrScannerModal from '../components/QrScannerModal';
 import {
   Search, ArrowLeft, Clock, Weight, Gem, User,
   FileCheck, Scissors, GitBranch, X, ExternalLink,
-  ChevronRight, ShieldCheck, AlertTriangle, Diamond, Info
+  ChevronRight, ShieldCheck, AlertTriangle, Diamond, Info, Camera,
+  Flame, Leaf, MessageSquare
 } from 'lucide-react';
 
 // ── Helpers ──
@@ -46,15 +48,33 @@ const STATUS_CONFIG = {
     sub: 'Currently being processed by the laboratory.',
   },
   2: {
-    label: 'Cut',
+    label: 'Transformed',
     badge: 'badge-gray',
     icon: Scissors,
-    plain: 'Stone Was Cut',
-    sub: 'This record was transformed into new stones.',
+    plain: 'Stone Was Transformed',
+    sub: 'This record was cut into new stones — see below for what it became.',
   },
 };
 
 const statusCfgFor = (status) => STATUS_CONFIG[status] ?? STATUS_CONFIG[0];
+
+// ── Treatment badge ──
+// Its own icon/color language (orange flame vs. green leaf), deliberately
+// unlike any Status badge color, so "Heated" is never mistaken for a
+// lifecycle state and never visually merges with "Active/Pending/Transformed".
+function TreatmentBadge({ isHeated }) {
+  return isHeated ? (
+    <span className="badge bg-orange-500/10 text-orange-400 border border-orange-500/20">
+      <Flame size={11} />
+      Heated
+    </span>
+  ) : (
+    <span className="badge bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+      <Leaf size={11} />
+      Natural
+    </span>
+  );
+}
 
 // ══════════════════════════════════════════════════════════════════════
 // Resolve every branch below a cut stone down to the stones that still
@@ -123,11 +143,12 @@ function StoneSnapshotModal({ stone, onClose }) {
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-content" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <div className="flex items-center gap-2.5 min-w-0">
+          <div className="flex items-center gap-2.5 min-w-0 flex-wrap">
             <h3 className="text-lg font-bold text-[var(--color-text-primary)] truncate">
               {stone.stoneState} <span className="text-[var(--color-text-muted)] text-base font-medium">#{stone.id}</span>
             </h3>
             <span className={`badge ${cfg.badge} flex-shrink-0`}>{cfg.label}</span>
+            <TreatmentBadge isHeated={!!stone.isHeated} />
           </div>
           <button onClick={onClose} className="icon-btn p-2 flex-shrink-0" aria-label="Close">
             <X size={20} className="text-[var(--color-text-muted)]" />
@@ -157,6 +178,16 @@ function StoneSnapshotModal({ stone, onClose }) {
               icon={GitBranch}
             />
           </div>
+
+          {stone.labComments && (
+            <div className="rounded-xl border border-[var(--color-border-subtle)] p-4" style={{ background: 'var(--color-bg-card)' }}>
+              <div className="flex items-center gap-2 text-[var(--color-text-muted)] text-xs font-semibold uppercase tracking-wide mb-2">
+                <MessageSquare size={13} />
+                <span>Lab Comments</span>
+              </div>
+              <p className="text-sm text-[var(--color-text-secondary)] leading-relaxed">{stone.labComments}</p>
+            </div>
+          )}
 
           {img && (
             <a
@@ -210,6 +241,7 @@ function TimelineNode({ stone, isCurrent, isFirst, index = 0, onOpen }) {
               </span>
               {isCurrent && <span className="badge badge-green">Current</span>}
               <span className={`badge ${cfg.badge}`}>{cfg.label}</span>
+              <TreatmentBadge isHeated={!!stone.isHeated} />
             </div>
 
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-[var(--color-text-muted)]">
@@ -266,6 +298,7 @@ function ResultCard({ stone, navigate }) {
             {stone.stoneState} <span className="text-[var(--color-text-muted)] font-medium text-sm">#{stone.id}</span>
           </span>
           <span className={`badge ${cfg.badge}`}>{cfg.label}</span>
+          <TreatmentBadge isHeated={!!stone.isHeated} />
         </div>
         <span className="text-lg font-bold text-[var(--color-text-primary)]">{formatWeight(stone.weight)}</span>
         <TrailBreadcrumb trail={stone.trail} />
@@ -399,6 +432,7 @@ export default function StoneViewer() {
   const [error, setError] = useState(null);
   const [disambig, setDisambig] = useState(null);
   const [modalStone, setModalStone] = useState(null);
+  const [scannerOpen, setScannerOpen] = useState(false);
 
   const redirectedFrom = searchParams.get('from');
 
@@ -509,6 +543,34 @@ export default function StoneViewer() {
     }
   };
 
+  // Certificates encode a full verification URL (see QRGenerator.jsx:
+  // `${origin}/?id=${tokenId}`), so try to pull the id out of a URL first;
+  // fall back to treating the scanned text as a bare numeric id, in case
+  // the QR was generated or re-printed some other way.
+  const handleScanResult = (decodedText) => {
+    setScannerOpen(false);
+
+    let id = null;
+    try {
+      const url = new URL(decodedText);
+      const fromQuery = url.searchParams.get('id');
+      if (fromQuery) id = parseInt(fromQuery, 10);
+    } catch {
+      // Not a URL — fall through to the plain-number check below.
+    }
+    if (id === null || isNaN(id)) {
+      const raw = parseInt(decodedText.trim(), 10);
+      if (!isNaN(raw)) id = raw;
+    }
+
+    if (id !== null && !isNaN(id) && id > 0) {
+      setSearchInput(String(id));
+      navigate(`/?id=${id}`);
+    } else {
+      setError("The scanned QR code didn't contain a valid Stone ID.");
+    }
+  };
+
   const ipfsImageUrl = stone ? resolveIpfsImage(stone.ipfsUri) : null;
   const statusCfg  = stone ? statusCfgFor(stone.status) : null;
   const StatusIcon = statusCfg?.icon;
@@ -534,8 +596,8 @@ export default function StoneViewer() {
           </p>
         </div>
 
-        <form onSubmit={handleSearch} className="flex flex-col sm:flex-row gap-3 max-w-xl mx-auto">
-          <div className="flex-1 relative">
+        <form onSubmit={handleSearch} className="max-w-xl mx-auto space-y-3">
+          <div className="relative">
             <Search size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)]" />
             <input
               id="stone-search-input"
@@ -549,15 +611,34 @@ export default function StoneViewer() {
               style={{ fontSize: '16px' }}
             />
           </div>
-          <button
-            id="stone-search-btn"
-            type="submit"
-            className="btn btn-primary px-7 py-3.5 text-base"
-          >
-            Verify
-          </button>
+          <div className="flex gap-3">
+            <button
+              id="stone-search-btn"
+              type="submit"
+              className="btn btn-primary px-7 py-3.5 text-base flex-1 justify-center"
+            >
+              Verify
+            </button>
+            <button
+              id="stone-scan-btn"
+              type="button"
+              onClick={() => setScannerOpen(true)}
+              className="btn btn-secondary px-5 py-3.5 flex-1 flex items-center justify-center gap-2"
+              aria-label="Scan QR code on certificate"
+              title="Scan QR code"
+            >
+              <Camera size={18} />
+              <span>Scan</span>
+            </button>
+          </div>
         </form>
       </div>
+
+      <QrScannerModal
+        isOpen={scannerOpen}
+        onClose={() => setScannerOpen(false)}
+        onScan={handleScanResult}
+      />
 
       {/* ── WELCOME STATE ── */}
       {!tokenId && !error && (
@@ -574,7 +655,7 @@ export default function StoneViewer() {
             {[
               { icon: ShieldCheck, label: 'Tamper-proof' },
               { icon: GitBranch,   label: 'Full Lineage' },
-              { icon: FileCheck,   label: 'Lab certified' },
+              { icon: FileCheck,   label: 'NGJA Certified' },
             ].map((item, i) => (
               <div key={i} className="card p-4 text-center">
                 <div className="w-10 h-10 mx-auto mb-2.5 rounded-xl bg-[var(--color-accent-glow)] border border-[var(--color-accent-ring)] flex items-center justify-center">
@@ -592,7 +673,7 @@ export default function StoneViewer() {
         <div className="alert alert-error animate-scale-in">
           <AlertTriangle size={18} className="flex-shrink-0 mt-0.5" />
           <div>
-            <p className="font-bold text-[var(--color-danger)] text-sm">{error}</p>
+            <p className="font-bold text-red-300 text-sm">{error}</p>
             <p className="text-red-400/70 text-xs mt-1">Please check the ID and try again</p>
           </div>
         </div>
@@ -666,6 +747,7 @@ export default function StoneViewer() {
                     {stone.stoneState} <span className="text-[var(--color-text-muted)] font-semibold text-base">#{tokenId}</span>
                   </h2>
                   <span className={`badge ${statusCfg.badge}`}>{statusCfg.label}</span>
+                  <TreatmentBadge isHeated={!!stone.isHeated} />
                 </div>
                 <p className="text-[var(--color-text-secondary)] text-sm">{formatDate(stone.timestamp)}</p>
               </div>
@@ -681,12 +763,28 @@ export default function StoneViewer() {
 
             <div className="rounded-2xl overflow-hidden border border-[var(--color-border-subtle)]">
               <DetailRow label="Stage"      value={stone.stoneState}                                                         icon={Gem} />
+              <DetailRow label="Treatment"  value={<TreatmentBadge isHeated={!!stone.isHeated} />}                            icon={stone.isHeated ? Flame : Leaf} />
               <DetailRow label="Certified"  value={formatDate(stone.timestamp)}                                               icon={Clock} />
               <DetailRow label="Custodian"  value={shortAddr(stone.custodian)}                                                icon={User} mono />
               <DetailRow label="Parent ID"  value={stone.parentTokenId === 0 ? 'Genesis (None)' : `#${stone.parentTokenId}`} icon={GitBranch} />
               <DetailRow label="Token ID"   value={`#${tokenId}`}                                                             icon={FileCheck} />
             </div>
           </div>
+
+          {/* ── LAB COMMENTS — its own card, separate from the status/treatment
+                badges above, so free-text lab notes never get visually mixed
+                with the stone's lifecycle state or treatment disclosure ── */}
+          {stone.labComments && (
+            <div className="card p-6 sm:p-7">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-10 h-10 rounded-xl bg-[var(--color-accent-glow)] border border-[var(--color-accent-ring)] flex items-center justify-center">
+                  <MessageSquare size={18} className="text-[var(--color-accent)]" />
+                </div>
+                <h3 className="text-base font-bold text-[var(--color-text-primary)]">Lab Comments</h3>
+              </div>
+              <p className="text-[var(--color-text-secondary)] text-sm leading-relaxed">{stone.labComments}</p>
+            </div>
+          )}
 
           {/* ── GEM IMAGE ── */}
           {ipfsImageUrl && (

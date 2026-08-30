@@ -25,6 +25,11 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
         Status status;
         uint256 timestamp;
         address custodian;
+        // ✅ NEW: treatment disclosure and free-text lab notes, recorded at
+        // every stage (genesis and each transformation) since a stone's
+        // treatment/notes can differ from its parent's after cutting.
+        bool isHeated;         // false = Natural, true = Heated
+        string labComments;
     }
 
     struct AuthorizedLab {
@@ -51,14 +56,16 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
     // transfer — it records production history; check stones[id].custodian for who holds it now.
     mapping(address => uint256[]) private _stonesMintedByLab;
 
-    event StoneCertified(uint256 indexed tokenId, uint256 weight, string stoneState, string uri);
+    event StoneCertified(uint256 indexed tokenId, uint256 weight, string stoneState, string uri, bool isHeated, string labComments);
     event TransformationRequested(uint256 indexed tokenId, address byLab);
     event StoneTransformed(
         uint256 indexed parentTokenId,
         uint256[] newTokenIds,
         uint256[] newWeights,
         string[] newStates,
-        string[] newUris
+        string[] newUris,
+        bool[] newIsHeated,
+        string[] newLabComments
     );
     event LabAuthorized(address indexed lab, string name, address indexed authorizedBy, uint256 timestamp);
     event LabRevoked(address indexed lab, address indexed revokedBy, uint256 timestamp);
@@ -83,7 +90,9 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
     function registerGenesis(
         string memory uri_,
         uint256 weight,
-        string memory stoneState
+        string memory stoneState,
+        bool isHeated,
+        string memory labComments
     ) external onlyRole(LAB_ROLE) nonReentrant returns (uint256) {
         require(weight > 0, "Weight must be positive");
         require(bytes(uri_).length > 0, "URI required");
@@ -98,7 +107,9 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
             ipfsUri: uri_,
             status: Status.Active,
             timestamp: block.timestamp,
-            custodian: msg.sender
+            custodian: msg.sender,
+            isHeated: isHeated,
+            labComments: labComments
         });
 
         _mint(msg.sender, newId, 1, "");
@@ -106,7 +117,7 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
 
         _stonesMintedByLab[msg.sender].push(newId); // ✅ NEW: track for admin recovery panel
 
-        emit StoneCertified(newId, weight, stoneState, uri_);
+        emit StoneCertified(newId, weight, stoneState, uri_, isHeated, labComments);
         return newId;
     }
 
@@ -125,11 +136,15 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
         uint256 parentTokenId,
         uint256[] calldata newWeights,
         string[] calldata newStates,
-        string[] calldata newUris
+        string[] calldata newUris,
+        bool[] calldata newIsHeated,
+        string[] calldata newLabComments
     ) external onlyRole(LAB_ROLE) nonReentrant returns (uint256[] memory) {
         require(
             newWeights.length == newStates.length &&
             newWeights.length == newUris.length &&
+            newWeights.length == newIsHeated.length &&
+            newWeights.length == newLabComments.length &&
             newWeights.length > 0,
             "Array lengths mismatch or zero children"
         );
@@ -167,7 +182,9 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
                 ipfsUri: newUris[i],
                 status: Status.Active,
                 timestamp: block.timestamp,
-                custodian: msg.sender
+                custodian: msg.sender,
+                isHeated: newIsHeated[i],
+                labComments: newLabComments[i]
             });
 
             _mint(msg.sender, childId, 1, "");
@@ -179,7 +196,7 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
             childIds[i] = childId;
         }
 
-        emit StoneTransformed(parentTokenId, childIds, newWeights, newStates, newUris);
+        emit StoneTransformed(parentTokenId, childIds, newWeights, newStates, newUris, newIsHeated, newLabComments);
 
         return childIds;
     }
@@ -268,7 +285,9 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
             string memory ipfsUri,
             uint8 status,
             uint256 timestamp,
-            address custodian
+            address custodian,
+            bool isHeated,
+            string memory labComments
         )
     {
         Stone storage s = stones[tokenId];
@@ -280,7 +299,9 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
             s.ipfsUri,
             uint8(s.status),
             s.timestamp,
-            s.custodian
+            s.custodian,
+            s.isHeated,
+            s.labComments
         );
     }
 
@@ -425,4 +446,3 @@ contract OptiCut is ERC1155, AccessControl, ReentrancyGuard {
         emit LabRevoked(lab, msg.sender, block.timestamp);
     }
 }
-

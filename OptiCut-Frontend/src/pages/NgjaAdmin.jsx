@@ -802,51 +802,58 @@ export default function NgjaAdmin() {
             </div>
           ) : (
             <div className="space-y-3">
-              {filteredLabs.map((lab) => (
-                <div 
-                  key={lab.address} 
-                  className="flex items-center gap-4 p-4 sm:p-5 bg-[var(--color-bg-tertiary)] rounded-2xl border border-[var(--color-border-subtle)] hover:border-[var(--color-accent-ring)] hover:shadow-[var(--shadow-glow)] transition-all group"
-                >
-                  <div className="w-11 h-11 rounded-xl bg-[var(--color-accent-glow)] border border-[var(--color-accent-ring)] flex items-center justify-center flex-shrink-0">
-                    <FlaskConical size={20} className="text-[var(--color-accent)]" />
-                  </div>
-
-                  {/* ✅ UPDATED: Lab name shown as primary text, address as secondary */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <p className="text-sm font-bold text-[var(--color-text-primary)] truncate">
-                        {lab.name || 'Unnamed Lab'}
-                      </p>
-                      <span className="badge badge-green text-[9px]">Authorized</span>
-                    </div>
-                    <p className="mono-addr text-xs inline-block mt-1">{lab.address}</p>
-                    <div className="flex items-center gap-3 mt-1.5 text-xs text-[var(--color-text-muted)]">
-                      <span className="flex items-center gap-1">
-                        <Shield size={10} />
-                        by {shortAddr(lab.authorizedBy)}
-                      </span>
-                      <span>·</span>
-                      <span>{formatDate(lab.timestamp)}</span>
-                    </div>
-                  </div>
-
-                  <button
-                    id={`revoke-${lab.address}`}
-                    onClick={() => setConfirmRevoke(lab.address)}
-                    disabled={revokeLoading === lab.address}
-                    className="btn btn-danger btn-sm flex-shrink-0 transition-opacity"
+              {filteredLabs.map((lab) => {
+                const isSelf = lab.address.toLowerCase() === account.toLowerCase();
+                return (
+                  <div 
+                    key={lab.address} 
+                    className="flex items-center gap-4 p-4 sm:p-5 bg-[var(--color-bg-tertiary)] rounded-2xl border border-[var(--color-border-subtle)] hover:border-[var(--color-accent-ring)] hover:shadow-[var(--shadow-glow)] transition-all group"
                   >
-                    {revokeLoading === lab.address ? (
-                      <Loader2 size={14} className="animate-spin" />
-                    ) : (
-                      <>
-                        <Trash2 size={14} />
-                        Revoke
-                      </>
-                    )}
-                  </button>
-                </div>
-              ))}
+                    <div className="w-11 h-11 rounded-xl bg-[var(--color-accent-glow)] border border-[var(--color-accent-ring)] flex items-center justify-center flex-shrink-0">
+                      <FlaskConical size={20} className="text-[var(--color-accent)]" />
+                    </div>
+
+                    {/* ✅ UPDATED: Lab name shown as primary text, address as secondary */}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <p className="text-sm font-bold text-[var(--color-text-primary)] truncate">
+                          {lab.name || 'Unnamed Lab'}
+                        </p>
+                        <span className="badge badge-green text-[9px]">Authorized</span>
+                        {/* ✅ NEW: flag the NGJA admin's own bootstrap lab entry so it isn't
+                            mistaken for a normal third-party lab */}
+                        {isSelf && <span className="badge badge-blue text-[9px]">Your Admin Wallet</span>}
+                      </div>
+                      <p className="mono-addr text-xs inline-block mt-1">{lab.address}</p>
+                      <div className="flex items-center gap-3 mt-1.5 text-xs text-[var(--color-text-muted)]">
+                        <span className="flex items-center gap-1">
+                          <Shield size={10} />
+                          by {shortAddr(lab.authorizedBy)}
+                        </span>
+                        <span>·</span>
+                        <span>{formatDate(lab.timestamp)}</span>
+                      </div>
+                    </div>
+
+                    <button
+                      id={`revoke-${lab.address}`}
+                      onClick={() => setConfirmRevoke(lab.address)}
+                      disabled={revokeLoading === lab.address || isSelf}
+                      title={isSelf ? "This is your connected NGJA admin wallet — revoke its lab role from a different admin session if you really need to." : undefined}
+                      className="btn btn-danger btn-sm flex-shrink-0 transition-opacity"
+                    >
+                      {revokeLoading === lab.address ? (
+                        <Loader2 size={14} className="animate-spin" />
+                      ) : (
+                        <>
+                          <Trash2 size={14} />
+                          Revoke
+                        </>
+                      )}
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
@@ -857,6 +864,3 @@ export default function NgjaAdmin() {
     </div>
   );
 }
-
-
-

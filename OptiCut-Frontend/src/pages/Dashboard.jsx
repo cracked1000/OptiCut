@@ -6,7 +6,7 @@ import QRGenerator from '../components/QRGenerator';
 import { 
   Plus, Lock, Scissors, Gem, Upload, X, CheckCircle2, 
   AlertTriangle, Loader2, ChevronDown, ChevronUp, Trash2,
-  ArrowRight, FileCheck, Clock, Flame, FlaskConical, Diamond, Info
+  ArrowRight, FileCheck, Clock, Flame, FlaskConical, Diamond, Info, Leaf
 } from 'lucide-react';
 
 const STONE_STATES = ['Rough', 'Preform', 'Cut', 'Polished'];
@@ -15,11 +15,14 @@ const formatWeight = (raw) => (raw / 100).toFixed(2) + ' ct';
 const formatDate = (ts) => ts ? new Date(ts * 1000).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) : '—';
 const shortAddr = (addr) => addr ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : '—';
 
-const STATUS_LABELS = { 0: 'Active', 1: 'Pending', 2: 'Burned' };
+const STATUS_LABELS = { 0: 'Active', 1: 'Pending', 2: 'Transformed' };
 const STATUS_CONFIG = {
   0: { badge: 'badge-green', icon: CheckCircle2 },
   1: { badge: 'badge-amber', icon: Clock },
-  2: { badge: 'badge-gray', icon: Flame },
+  // Uses Scissors rather than a flame icon — "Transformed" means cut into
+  // child stones, and a fire-style icon here would visually collide with
+  // the separate Heated/Natural treatment badge shown alongside it.
+  2: { badge: 'badge-gray', icon: Scissors },
 };
 
 const STATE_STYLES = {
@@ -28,6 +31,25 @@ const STATE_STYLES = {
   'Cut': { bg: 'bg-purple-500/15', text: 'text-purple-400', border: 'border-purple-500/20' },
   'Polished': { bg: 'bg-emerald-500/15', text: 'text-emerald-400', border: 'border-emerald-500/20' },
 };
+
+// ── Treatment badge ──
+// Deliberately its own small component with its own icon/color language
+// (orange flame vs. green leaf) so it never reads like a lifecycle Status
+// badge (Active/Pending/Transformed) — the two describe completely
+// different things about a stone and shouldn't visually blend together.
+function TreatmentBadge({ isHeated }) {
+  return isHeated ? (
+    <span className="badge bg-orange-500/10 text-orange-400 border border-orange-500/20">
+      <Flame size={11} />
+      Heated
+    </span>
+  ) : (
+    <span className="badge bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+      <Leaf size={11} />
+      Natural
+    </span>
+  );
+}
 
 // ── Error Display ──
 function ErrorDisplay({ error, onRetry }) {
@@ -91,10 +113,21 @@ function MintSuccessModal({ tokenId, stoneData, onClose, onView }) {
               <span className="badge badge-green text-[10px]">Active</span>
             </div>
             <div className="bg-[var(--color-bg-tertiary)] rounded-xl p-4 border border-[var(--color-border-subtle)]">
+              <p className="text-[var(--color-text-muted)] text-[10px] font-bold uppercase tracking-wider mb-1">Treatment</p>
+              <TreatmentBadge isHeated={!!stoneData?.isHeated} />
+            </div>
+            <div className="bg-[var(--color-bg-tertiary)] rounded-xl p-4 border border-[var(--color-border-subtle)] col-span-2">
               <p className="text-[var(--color-text-muted)] text-[10px] font-bold uppercase tracking-wider mb-1">Date</p>
               <p className="text-[var(--color-text-primary)] font-medium text-sm">{formatDate(Math.floor(Date.now() / 1000))}</p>
             </div>
           </div>
+
+          {stoneData?.labComments && (
+            <div className="bg-[var(--color-bg-tertiary)] rounded-xl p-4 border border-[var(--color-border-subtle)]">
+              <p className="text-[var(--color-text-muted)] text-[10px] font-bold uppercase tracking-wider mb-1.5">Lab Comments</p>
+              <p className="text-[var(--color-text-secondary)] text-sm leading-relaxed">{stoneData.labComments}</p>
+            </div>
+          )}
 
           <div className="bg-[var(--color-bg-secondary)] rounded-xl p-5 border border-[var(--color-border-subtle)]">
             <p className="text-[var(--color-text-muted)] text-xs font-semibold mb-4 text-center">Certificate QR Code</p>
@@ -191,9 +224,10 @@ export default function Dashboard() {
   const [genUri, setGenUri] = useState('');
   const [genWeight, setGenWeight] = useState('');
   const [genState, setGenState] = useState('Rough');
+  const [genIsHeated, setGenIsHeated] = useState(false);
+  const [genLabComments, setGenLabComments] = useState('');
   const [mintedTokenId, setMintedTokenId] = useState(null);
   const [mintedStoneData, setMintedStoneData] = useState(null);
-  const [showMintModal, setShowMintModal] = useState(false);
 
   const [selectedFile, setSelectedFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
@@ -202,7 +236,7 @@ export default function Dashboard() {
 
   const [reqTokenId, setReqTokenId] = useState('');
   const [parentId, setParentId] = useState('');
-  const emptyChild = () => ({ weight: '', state: 'Cut', uri: '', file: null, previewUrl: null, uploading: false, uploadMsg: null });
+  const emptyChild = () => ({ weight: '', state: 'Cut', uri: '', isHeated: false, labComments: '', file: null, previewUrl: null, uploading: false, uploadMsg: null });
   const [childInputs, setChildInputs] = useState([emptyChild()]);
 
   const [txHash, setTxHash] = useState('');
@@ -332,13 +366,18 @@ export default function Dashboard() {
     setMinting(true); setTxHash(''); setErrorMSG('');
     setMintedTokenId(null);
     try {
-      const receipt = await registerGenesis(genUri, genWeight, genState);
+      const receipt = await registerGenesis(genUri, genWeight, genState, genIsHeated, genLabComments);
       const newId = getMintedTokenId(receipt);
       setMintedTokenId(newId);
-      setMintedStoneData({ weight: Math.round(parseFloat(genWeight) * 100), stoneState: genState });
-      setShowMintModal(true);
+      setMintedStoneData({
+        weight: Math.round(parseFloat(genWeight) * 100),
+        stoneState: genState,
+        isHeated: genIsHeated,
+        labComments: genLabComments,
+      });
       setTxHash(receipt.hash);
       setGenUri(''); setGenWeight(''); setGenState('Rough');
+      setGenIsHeated(false); setGenLabComments('');
       setSelectedFile(null); setPreviewUrl(null); setUploadMsg(null);
       showToast(newId ? `Stone #${newId} minted successfully!` : 'Stone minted successfully!', 'success');
     } catch (err) { 
@@ -370,6 +409,8 @@ export default function Dashboard() {
       const weights = childInputs.map(c => c.weight);
       const states = childInputs.map(c => c.state);
       const uris = childInputs.map(c => c.uri);
+      const isHeatedFlags = childInputs.map(c => c.isHeated);
+      const labComments = childInputs.map(c => c.labComments);
 
       // Friendly client-side guard before spending gas — the contract also
       // enforces this rule, this just catches mistakes earlier.
@@ -380,7 +421,7 @@ export default function Dashboard() {
         return;
       }
 
-      const receipt = await completeTransformation(parentId, weights, states, uris);
+      const receipt = await completeTransformation(parentId, weights, states, uris, isHeatedFlags, labComments);
       setTxHash(receipt.hash);
       setParentId('');
       childInputs.forEach(c => { if (c.previewUrl) URL.revokeObjectURL(c.previewUrl); });
@@ -455,8 +496,8 @@ export default function Dashboard() {
       <MintSuccessModal 
         tokenId={mintedTokenId} 
         stoneData={mintedStoneData}
-        onClose={() => setShowMintModal(false)}
-        onView={() => { setShowMintModal(false); navigate(`/?id=${mintedTokenId}`); }}
+        onClose={() => { setMintedTokenId(null); setMintedStoneData(null); }}
+        onView={() => { navigate(`/?id=${mintedTokenId}`); setMintedTokenId(null); setMintedStoneData(null); }}
       />
 
       <header className="text-center mb-10">
@@ -482,8 +523,8 @@ export default function Dashboard() {
         <div className="alert alert-success animate-scale-in">
           <CheckCircle2 size={18} className="flex-shrink-0 mt-0.5" />
           <div className="flex-1 min-w-0">
-            <p className="font-bold text-sm">Transaction Successful</p>
-            <p className="text-xs font-mono mt-1 break-all opacity-80">{txHash}</p>
+            <p className="font-bold text-emerald-300 text-sm">Transaction Successful</p>
+            <p className="text-emerald-400/70 text-xs font-mono mt-1 break-all">{txHash}</p>
           </div>
         </div>
       )}
@@ -492,8 +533,8 @@ export default function Dashboard() {
         <div className="alert alert-error animate-scale-in">
           <AlertTriangle size={18} className="flex-shrink-0 mt-0.5" />
           <div>
-            <p className="font-bold">Transaction Failed</p>
-            <p className="text-xs mt-1 opacity-80">{errorMSG}</p>
+            <p className="font-bold text-red-300">Transaction Failed</p>
+            <p className="text-red-400/70 text-xs mt-1">{errorMSG}</p>
           </div>
         </div>
       )}
@@ -558,6 +599,57 @@ export default function Dashboard() {
                   <select id="gen-state" value={genState} onChange={(e) => setGenState(e.target.value)} className="input">
                     {STONE_STATES.map(s => <option key={s} value={s}>{s}</option>)}
                   </select>
+                </div>
+              </div>
+
+              {/* Treatment & lab notes — kept in their own labeled block, separate
+                  from Stone State above and from the Active/Pending/Transformed
+                  lifecycle status shown elsewhere, so the three never blur together. */}
+              <div className="rounded-xl border border-[var(--color-border-subtle)] p-4 bg-[var(--color-bg-tertiary)] space-y-4">
+                <p className="text-[10px] font-bold text-[var(--color-text-muted)] uppercase tracking-wider">Treatment &amp; Lab Notes</p>
+                <div>
+                  <label className="label">Treatment</label>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setGenIsHeated(false)}
+                      className={`flex items-center justify-center gap-2 py-2.5 rounded-xl border text-sm font-semibold transition-all ${
+                        !genIsHeated
+                          ? 'border-emerald-500 bg-emerald-500/10 text-emerald-400'
+                          : 'border-[var(--color-border-subtle)] text-[var(--color-text-muted)] hover:border-[var(--color-border-hover)]'
+                      }`}
+                    >
+                      <Leaf size={15} />
+                      Natural
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setGenIsHeated(true)}
+                      className={`flex items-center justify-center gap-2 py-2.5 rounded-xl border text-sm font-semibold transition-all ${
+                        genIsHeated
+                          ? 'border-orange-500 bg-orange-500/10 text-orange-400'
+                          : 'border-[var(--color-border-subtle)] text-[var(--color-text-muted)] hover:border-[var(--color-border-hover)]'
+                      }`}
+                    >
+                      <Flame size={15} />
+                      Heated
+                    </button>
+                  </div>
+                  <p className="hint">
+                    <Info size={14} />
+                    Discloses whether the stone has undergone heat treatment — independent of its Active/Pending/Transformed status.
+                  </p>
+                </div>
+                <div>
+                  <label className="label">Lab Comments (optional)</label>
+                  <textarea
+                    id="gen-lab-comments"
+                    value={genLabComments}
+                    onChange={(e) => setGenLabComments(e.target.value)}
+                    className="input min-h-[80px] resize-y"
+                    placeholder="e.g. Minor surface inclusions noted; clarity graded under 10x loupe."
+                    maxLength={500}
+                  />
                 </div>
               </div>
 
@@ -662,6 +754,51 @@ export default function Dashboard() {
                         <input type="text" required value={child.uri} onChange={(e) => updateChild(idx, 'uri', e.target.value)} className="input py-2.5 text-sm" placeholder="ipfs://... (auto-filled after upload)" />
                       </div>
                     </div>
+
+                    {/* Kept visually separate from Weight/State/URI above — this
+                        child's treatment disclosure and lab notes, not its
+                        physical description or lifecycle status. */}
+                    <div className="mt-3 pt-3 border-t border-[var(--color-border-subtle)] space-y-3">
+                      <div>
+                        <label className="text-[10px] font-bold text-[var(--color-text-muted)] uppercase tracking-wider mb-1.5 block">Treatment</label>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => updateChild(idx, 'isHeated', false)}
+                            className={`flex items-center justify-center gap-1.5 py-2 rounded-lg border text-xs font-semibold transition-all ${
+                              !child.isHeated
+                                ? 'border-emerald-500 bg-emerald-500/10 text-emerald-400'
+                                : 'border-[var(--color-border-subtle)] text-[var(--color-text-muted)] hover:border-[var(--color-border-hover)]'
+                            }`}
+                          >
+                            <Leaf size={13} />
+                            Natural
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => updateChild(idx, 'isHeated', true)}
+                            className={`flex items-center justify-center gap-1.5 py-2 rounded-lg border text-xs font-semibold transition-all ${
+                              child.isHeated
+                                ? 'border-orange-500 bg-orange-500/10 text-orange-400'
+                                : 'border-[var(--color-border-subtle)] text-[var(--color-text-muted)] hover:border-[var(--color-border-hover)]'
+                            }`}
+                          >
+                            <Flame size={13} />
+                            Heated
+                          </button>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-bold text-[var(--color-text-muted)] uppercase tracking-wider mb-1.5 block">Lab Comments (optional)</label>
+                        <textarea
+                          value={child.labComments}
+                          onChange={(e) => updateChild(idx, 'labComments', e.target.value)}
+                          className="input py-2 text-sm min-h-[60px] resize-y"
+                          placeholder="Notes specific to this piece after cutting..."
+                          maxLength={500}
+                        />
+                      </div>
+                    </div>
                   </div>
                 ))}
 
@@ -751,10 +888,11 @@ export default function Dashboard() {
                             <StatusIcon size={10} />
                             {STATUS_LABELS[s.status]}
                           </span>
+                          <TreatmentBadge isHeated={!!s.isHeated} />
                         </div>
                         <div className="flex items-center gap-3 text-sm">
                           <span className="font-bold text-[var(--color-text-primary)]">{formatWeight(s.weight)}</span>
-                          <span className={`px-2 py-0.5 rounded-lg text-xs font-semibold border ${stateStyle.bg}`}>
+                          <span className={`px-2 py-0.5 rounded-lg text-xs font-semibold border ${stateStyle.bg} ${stateStyle.text} ${stateStyle.border}`}>
                             {s.stoneState}
                           </span>
                           <span className="text-[var(--color-text-muted)] text-xs">{formatDate(s.timestamp)}</span>
@@ -773,4 +911,3 @@ export default function Dashboard() {
     </div>
   );
 }
-

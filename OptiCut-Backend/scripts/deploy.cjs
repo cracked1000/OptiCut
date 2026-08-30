@@ -24,17 +24,18 @@ async function main() {
   console.log(`Granted NGJA_ADMIN_ROLE to ${deployer.address}`);
   console.log(`Granted LAB_ROLE to ${lab1.address}`);
 
-  saveFrontendFiles(address);
+  await saveFrontendFiles(address);
 }
 
-function saveFrontendFiles(contractAddress) {
+async function saveFrontendFiles(contractAddress) {
   const contractsDir = path.join(__dirname, "..", "..", "OptiCut-Frontend", "src", "contracts");
 
   if (!fs.existsSync(contractsDir)) {
     fs.mkdirSync(contractsDir, { recursive: true });
   }
 
-  const ContractArtifact = hre.artifacts.readArtifactSync("OptiCut");
+  // Hardhat 3 removed readArtifactSync — artifact reads are async-only now.
+  const ContractArtifact = await hre.artifacts.readArtifact("OptiCut");
 
   fs.writeFileSync(
     path.join(contractsDir, "OptiCut.json"),

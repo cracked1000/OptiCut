@@ -1,5 +1,5 @@
 {
-  "address": "0x0570f6De876B6f739019a76AB1525A49DD930868",
+  "address": "0x4cc81141F405124EF801651afE6e1dffbbc48cBC",
   "abi": [
     {
       "inputs": [],
@@ -316,6 +316,18 @@
           "internalType": "string",
           "name": "uri",
           "type": "string"
+        },
+        {
+          "indexed": false,
+          "internalType": "bool",
+          "name": "isHeated",
+          "type": "bool"
+        },
+        {
+          "indexed": false,
+          "internalType": "string",
+          "name": "labComments",
+          "type": "string"
         }
       ],
       "name": "StoneCertified",
@@ -389,6 +401,18 @@
           "indexed": false,
           "internalType": "string[]",
           "name": "newUris",
+          "type": "string[]"
+        },
+        {
+          "indexed": false,
+          "internalType": "bool[]",
+          "name": "newIsHeated",
+          "type": "bool[]"
+        },
+        {
+          "indexed": false,
+          "internalType": "string[]",
+          "name": "newLabComments",
           "type": "string[]"
         }
       ],
@@ -695,6 +719,16 @@
           "internalType": "string[]",
           "name": "newUris",
           "type": "string[]"
+        },
+        {
+          "internalType": "bool[]",
+          "name": "newIsHeated",
+          "type": "bool[]"
+        },
+        {
+          "internalType": "string[]",
+          "name": "newLabComments",
+          "type": "string[]"
         }
       ],
       "name": "completeTransformation",
@@ -938,6 +972,16 @@
           "internalType": "address",
           "name": "custodian",
           "type": "address"
+        },
+        {
+          "internalType": "bool",
+          "name": "isHeated",
+          "type": "bool"
+        },
+        {
+          "internalType": "string",
+          "name": "labComments",
+          "type": "string"
         }
       ],
       "stateMutability": "view",
@@ -1080,6 +1124,16 @@
         {
           "internalType": "string",
           "name": "stoneState",
+          "type": "string"
+        },
+        {
+          "internalType": "bool",
+          "name": "isHeated",
+          "type": "bool"
+        },
+        {
+          "internalType": "string",
+          "name": "labComments",
           "type": "string"
         }
       ],
@@ -1284,6 +1338,16 @@
           "internalType": "address",
           "name": "custodian",
           "type": "address"
+        },
+        {
+          "internalType": "bool",
+          "name": "isHeated",
+          "type": "bool"
+        },
+        {
+          "internalType": "string",
+          "name": "labComments",
+          "type": "string"
         }
       ],
       "stateMutability": "view",
